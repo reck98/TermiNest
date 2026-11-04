@@ -1,70 +1,95 @@
-# Milestone 0: Transport Feasibility Spike Report
+# Milestone 0: Transport Feasibility & Platform Audit Report
 
 **Date:** November 2026  
 **Subject:** Host-Guest Transport Investigation (Windows Host -> Ubuntu 24.04 LTS Guest)  
 **Authors:** TermiNest Systems Architecture & Engineering Team  
+**Audit Status:** Audited and Qualified (M0 Closure Audit)  
 
 ---
 
-## 1. Objective
+## 1. Executive Summary & Capability Classification
 
-ADR-0003 establishes **Point-to-Point Virtual Sockets (Vsock)** as the target host-guest IPC mechanism for TermiNest, replacing the file-based shared folder mailbox of `terminal-mac`.
+To ensure rigorous systems engineering without unsupported claims, all transport capabilities are formally classified according to the five-state taxonomy:
 
-The objective of this feasibility spike is to validate:
-1. Windows host socket APIs for virtualization (`AF_HYPERV` vs alternatives).
-2. Linux guest socket support (`AF_VSOCK`, `hv_sock`).
-3. Interoperability between Windows host and Linux guest across different Windows editions (Windows 11 Pro vs. Windows 11 Home).
-4. Fallback architectures when native hypervisor Vsock is unavailable or restricted.
+| Transport Component / Capability | Implementation & Verification Status | Scope in M0 |
+|---|---|---|
+| **`Transport` Trait Abstraction** | **Implemented & Tested** | Core bidirectional async interface in `terminest-transport`. |
+| **`InMemoryTransport` Duplex Channel** | **Implemented & Tested** | In-memory Tokio channel pair for deterministic unit/integration testing. |
+| **`FramedTransport<IO>` Async Adapter** | **Implemented & Tested** | Stream framing adapter over generic `AsyncRead + AsyncWrite` streams. |
+| **Vsock Address & Hyper-V GUID Generator** | **Implemented & Tested** | Addressing models and GUID converters in `terminest-transport::vsock`. |
+| **Host-to-Guest `AF_HYPERV` Transport** | **Designed & Mapped (Unverified on real VM)** | Winsock API architecture mapped; real VM integration requires elevated registry setup in M2. |
+| **QEMU/WHP + Virtio-Serial + Named Pipe** | **Designed but Not Implemented** | Proposed fallback architecture for Windows Home; concrete adapter not yet built. |
+| **Cryptographic Authentication (AEAD)** | **Deferred** | Out of scope for M0; deferred to future network transport milestones. |
 
 ---
 
-## 2. Platform Environment Findings
+## 2. Host Platform Reconnaissance Findings
 
-During environment reconnaissance on the target machine:
-- **Host OS:** Microsoft Windows 11 Home Single Language (Build 26300, 64-bit).
-- **CPU:** 12th Gen Intel Core i5-12450H (x86_64, 8 cores / 12 logical processors).
-- **Virtualization Features:**
+Environment reconnaissance was conducted directly on the target host workstation:
+- **Host Operating System:** Microsoft Windows 11 Home Single Language (Build 26300, 64-bit).
+- **Host CPU:** 12th Gen Intel Core i5-12450H (x86_64, 8 cores / 12 logical processors).
+- **Hardware Virtualization Flags:**
   - `VirtualMachinePlatform` (VMP): **Enabled**.
   - `HypervisorPlatform` (WHP): **Enabled**.
   - `Microsoft-Hyper-V-Hypervisor` (VMMS): **Not supported on Windows Home edition**.
-- **WSL2:** Active, running Ubuntu-24.04 LTS default.
+- **WSL2 Runtime:** Active, default distribution Ubuntu-24.04 LTS.
 
 ---
 
-## 3. Deep-Dive Analysis of Virtualization Socket Transports
+## 3. Real Platform Vsock Investigation & Discoveries
 
-### 3.1. Windows Hyper-V Sockets (`AF_HYPERV`, Socket Family 34)
-- **Mechanism:** Windows Hyper-V Sockets communicate directly over the VMBus hypervisor transport using Winsock address family `AF_HYPERV` (`34`).
-- **Addressing:**
-  - Uses `SOCKADDR_HV` struct containing two GUIDs:
-    - `VmId`: The virtual machine GUID, or `HV_GUID_PARENT` (`a42e7cda-d03f-480c-9cc2-a4de20abb878`) from guest to host.
-    - `ServiceId`: The service GUID. For port-based routing, the port is mapped using `{PORT-facb-11e6-bd58-64006a561569}` (e.g. port `10001` -> `{00002711-facb-11e6-bd58-64006a561569}`).
-- **Linux Guest Support:** The Linux kernel includes `hv_sock` drivers in mainline kernels since 4.8. When Ubuntu 24.04 LTS runs inside Hyper-V, `AF_VSOCK` calls are seamlessly bridged to `hv_sock` over VMBus.
-- **Limitation on Windows Home:** Native Hyper-V VMMS service is unavailable on Windows Home. `AF_HYPERV` requires the Hyper-V virtualization infrastructure.
+### 3.1. WSL2 `/dev/vsock` Inspection
+Direct inspection of the Ubuntu 24.04 LTS environment inside WSL2 confirmed:
+1. `/dev/vsock` is present as a character device (`crw-rw-rw- 1 root root 10, 259`).
+2. Active Vsock streams (`ss -a --vsock`) exist between the guest and Windows host CID `2` (`VMADDR_CID_HOST`).
+3. Calling `IOCTL_VM_SOCKETS_GET_LOCAL_CID` on `/dev/vsock` returns `4294967295` (`VMADDR_CID_ANY`).
+4. **Root Cause:** On Windows Hyper-V, the Linux `hv_sock` driver does not assign fixed integer CIDs to guests. Instead, Hyper-V identifies guest endpoints by 128-bit VM GUIDs and routes services via Service GUIDs.
 
-### 3.2. QEMU with Windows Hypervisor Platform (WHP)
-- **Mechanism:** On Windows Home, ADR-0002 selects QEMU with `-accel whpx` as the hypervisor backend.
-- **Vsock Reality on Windows Host:**
-  - Standard Linux QEMU uses `/dev/vhost-vsock`, which is a Linux-kernel-only device node.
-  - Windows host OS does not possess a `/dev/vhost-vsock` kernel driver.
-  - Therefore, running QEMU on Windows cannot use native Linux `vhost-vsock`.
-- **Architectural Solution for Windows Home:**
-  1. **Virtio-Serial over Local Named Pipe / Socket:** QEMU emulates `virtio-serial-pci` inside the guest (which appears in Linux as `/dev/virtio-ports/terminest`), connected on the Windows host to a local Windows Named Pipe (`\\.\pipe\terminest-<vmid>`) or local loopback TCP socket (`127.0.0.1:<port>`).
-  2. **Isolated Private Host-Only Virtual Switch:** QEMU forwards port 10001 over an internal, air-gapped user network (`-netdev user,id=net0,hostfwd=tcp:127.0.0.1:10001-:10001`).
-  3. **Abstraction Seam:** Because the `Transport` and `FramedTransport` traits in `terminest-transport` are agnostic of the underlying stream type (`AsyncRead + AsyncWrite`), the exact same `StreamDecoder` and TNST-v1 wire protocol execute identically over Hyper-V Vsock, Unix domain sockets, Windows named pipes, and local stream sockets without changing a single line of protocol code.
-
----
-
-## 4. Reconnection and Fault Tolerance
-
-1. **Abrupt Guest Reset:** When a guest VM resets or reboots, the socket stream terminates with EOF or reset. The host `FramedTransport::recv()` detects EOF and safely marks the connection closed without panic.
-2. **Heartbeat Liveness:** If 3 consecutive heartbeat intervals (6 seconds) pass without frames, the host detects a dead connection and triggers reconnection.
-3. **Session Worker Reconnect:** If the interactive session worker restarts, the system daemon maintains the host socket and relays commands to the newly spawned worker.
+### 3.2. Critical Windows Security Finding: Service GUID Registry Requirement
+Inspection of the Windows Host Registry revealed a foundational constraint for native Hyper-V Sockets:
+- Windows Hyper-V Sockets (`AF_HYPERV`, socket family 34) require that any custom listening service GUID be registered under:
+  `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\<Service-GUID>`
+- Existing registered services on the host include:
+  - `{999E53D4-3D5C-4C3E-8779-BED06EC056E1}` (VM Session Service)
+  - `{A5201C21-2770-4C11-A68E-F182EDB29220}` (VM Session Service-2)
+- **Security & Privilege Implication:** Writing to `HKLM` requires **Administrator privileges**. Under `REQ-INST-01` (Non-Root Host Installation), an unprivileged TermiNest orchestrator running in user space (`%LOCALAPPDATA%`) **cannot dynamically register its own custom Service GUID** without prior administrative setup.
+- **Architectural Mitigation:**
+  1. For Windows Pro/Enterprise with Hyper-V: The one-time setup installer (`install.ps1`) must register the TermiNest Service GUID (`{00002711-facb-11e6-bd58-64006a561569}`) with administrative rights, OR
+  2. The orchestrator must connect from Host to Guest (where the Guest daemon initiates the listener), OR
+  3. The unprivileged fallback transport (Windows Named Pipes or loopback stream) must be used.
 
 ---
 
-## 5. Conclusions & M0 Validation
+## 4. Windows Home Transport Evaluation (QEMU/WHP)
 
-1. `terminest-transport` successfully implements `InMemoryTransport` and `FramedTransport<IO>` satisfying all requirements for deterministic testing and multi-backend deployment.
-2. The protocol layer is decoupled from kernel-specific socket headers.
-3. Windows Pro deployments will leverage native `AF_HYPERV`, while Windows Home (QEMU/WHP) will use stream-backed virtio-serial or private loopback framing.
+On Windows Home, Hyper-V management is absent, requiring QEMU with Windows Hypervisor Platform (`-accel whpx`):
+- **Vsock Limitation:** The Linux kernel driver `/dev/vhost-vsock` does not exist on Windows. QEMU on Windows cannot attach a host-side `/dev/vhost-vsock` backend.
+- **Proposed Architecture (Designed):**
+  - QEMU attaches a `virtio-serial-pci` device to the guest VM (exposed in Linux as `/dev/virtio-ports/terminest`).
+  - On the Windows host, QEMU attaches the serial port to a Windows Named Pipe (`\\.\pipe\terminest-<name>`) or local loopback TCP socket (`127.0.0.1:10001`).
+- **Audit Qualification:** This architecture is **designed but not implemented** in M0. The `FramedTransport<IO>` adapter proves that any asynchronous byte stream can frame TNST-v1 packets, but the concrete Windows Named Pipe adapter and QEMU process manager belong to Milestone 1 and Milestone 2.
+
+---
+
+## 5. Security Property Distinction
+
+The implementation enforces the following distinct security boundaries:
+
+| Security Property | Mechanism in M0 | Status |
+|---|---|---|
+| **Accidental Corruption Detection** | Castagnoli CRC-32C over header prefix (0..12) and payload (ADR-0010) | **Implemented & Tested** |
+| **Stream Framing Integrity** | `StreamDecoder` poisoning on malformed headers, bounds checking | **Implemented & Tested** |
+| **DoS Memory Protection** | 16 MB maximum payload limit, 32 MB decoder capacity cap | **Implemented & Tested** |
+| **Transport Isolation** | Hardware hypervisor memory rings (`AF_VSOCK` / `AF_HYPERV`) | **Architecture Dependency (M2)** |
+| **Peer Authentication** | Cryptographic identity verification (mutual TLS / HMAC tokens) | **Deferred to Network Transports** |
+| **Confidentiality / Encryption** | In-transit stream encryption (TLS / WireGuard) | **Deferred to Network Transports** |
+
+---
+
+## 6. Reproducible Experiment for Future Host-Guest Validation
+
+To validate host-guest connectivity in Milestone 2 when guest provisioning is ready:
+1. **Linux Guest Daemon:** Bind `AF_VSOCK` port `10001` inside Ubuntu 24.04 LTS guest.
+2. **Windows Host Listener:** Open `AF_HYPERV` socket, bind to `{00002711-facb-11e6-bd58-64006a561569}`.
+3. **Framed Transport Ping:** Exchange 1,000 TNST-v1 control frames over `FramedTransport`.
+4. **Measure Round-Trip Latency:** Record latency using high-resolution hardware counters.

@@ -56,7 +56,7 @@ pub struct JsonRpcResponse<R = serde_json::Value> {
     pub result: Option<R>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
-    pub id: RequestId,
+    pub id: Option<RequestId>,
 }
 
 impl<R> JsonRpcResponse<R> {
@@ -65,16 +65,34 @@ impl<R> JsonRpcResponse<R> {
             jsonrpc: JSONRPC_VERSION.to_string(),
             result: Some(result),
             error: None,
-            id,
+            id: Some(id),
         }
     }
 
-    pub fn error(id: RequestId, error: JsonRpcError) -> Self {
+    pub fn error(id: Option<RequestId>, error: JsonRpcError) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             result: None,
             error: Some(error),
             id,
+        }
+    }
+}
+
+/// A standard JSON-RPC 2.0 Notification object (request without an id).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsonRpcNotification<T = serde_json::Value> {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: T,
+}
+
+impl<T> JsonRpcNotification<T> {
+    pub fn new(method: impl Into<String>, params: T) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method: method.into(),
+            params,
         }
     }
 }
@@ -403,7 +421,7 @@ mod tests {
     #[test]
     fn test_error_response_serialization() {
         let err_resp: JsonRpcResponse<()> = JsonRpcResponse::error(
-            RequestId::Number(99),
+            Some(RequestId::Number(99)),
             JsonRpcError::new(error_codes::SESSION_UNAVAILABLE, "Session is locked"),
         );
 
@@ -411,5 +429,33 @@ mod tests {
         assert!(json.contains("\"code\":-32000"));
         assert!(json.contains("Session is locked"));
         assert!(!json.contains("\"result\""));
+    }
+
+    #[test]
+    fn test_null_id_error_response_serialization() {
+        let err_resp: JsonRpcResponse<()> = JsonRpcResponse::error(
+            None,
+            JsonRpcError::new(error_codes::PARSE_ERROR, "Parse error"),
+        );
+
+        let json = serde_json::to_string(&err_resp).unwrap();
+        assert!(json.contains("\"id\":null"));
+        assert!(json.contains("\"code\":-32700"));
+    }
+
+    #[test]
+    fn test_notification_roundtrip() {
+        let notif = JsonRpcNotification::new(
+            "guest.ping",
+            PingParams {
+                timestamp_ms: Some(12345),
+            },
+        );
+        let json = serde_json::to_string(&notif).unwrap();
+        assert!(!json.contains("\"id\""));
+        assert!(json.contains("\"method\":\"guest.ping\""));
+
+        let parsed: JsonRpcNotification<PingParams> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, notif);
     }
 }

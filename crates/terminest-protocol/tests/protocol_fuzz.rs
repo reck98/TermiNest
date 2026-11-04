@@ -7,11 +7,11 @@ proptest! {
     #[test]
     fn prop_frame_encode_decode_roundtrip(
         channel_raw in 0u16..=3u16,
-        flag_byte in 0u8..=3u8, // plain, lz4, jpeg (non-heartbeat)
+        flag_byte in prop_oneof![Just(0u8), Just(1u8), Just(2u8)], // plain, lz4, jpeg (non-conflicting)
         payload in proptest::collection::vec(any::<u8>(), 0..65536)
     ) {
         let channel = ChannelId::from_raw(channel_raw).unwrap();
-        let flags = FrameFlags(flag_byte);
+        let flags = FrameFlags::from_raw(flag_byte).unwrap();
         let bytes = bytes::Bytes::from(payload);
 
         let frame = Frame::new(channel, flags, bytes.clone()).unwrap();
@@ -64,5 +64,24 @@ proptest! {
 
         let corrupted_crc = crc32c(&corrupted);
         prop_assert_ne!(original_crc, corrupted_crc, "Single bit flip was not detected by CRC-32C");
+    }
+
+    /// Invariant 4: Any single-bit flip anywhere in an encoded frame (header or payload)
+    /// must be deterministically rejected by Frame::decode under ADR-0010.
+    #[test]
+    fn prop_frame_detects_any_bit_flip(
+        payload in proptest::collection::vec(any::<u8>(), 1..512),
+        bit_offset in 0usize..4096usize
+    ) {
+        let frame = Frame::control(bytes::Bytes::from(payload)).unwrap();
+        let mut encoded = frame.encode().to_vec();
+
+        let target_byte = (bit_offset / 8) % encoded.len();
+        let target_bit = (bit_offset % 8) as u8;
+        encoded[target_byte] ^= 1 << target_bit;
+
+        // Either header decoding fails (e.g. invalid magic/version/channel/flags)
+        // or checksum verification fails. It must NEVER decode as a valid frame!
+        prop_assert!(Frame::decode(&encoded).is_err());
     }
 }

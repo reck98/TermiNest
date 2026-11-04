@@ -12,6 +12,12 @@ pub enum ProtocolError {
     #[error("Unknown channel ID: 0x{0:04X}")]
     UnknownChannel(u16),
 
+    #[error("Invalid frame flags or reserved bits set: 0x{0:02X}")]
+    InvalidFlags(u8),
+
+    #[error("Stream decoder is poisoned due to a previous unrecoverable framing error")]
+    StreamPoisoned,
+
     #[error("Payload length {actual} exceeds maximum allowed limit of {max} bytes")]
     PayloadTooLarge { actual: u32, max: u32 },
 

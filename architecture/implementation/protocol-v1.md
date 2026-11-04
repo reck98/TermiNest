@@ -1,6 +1,6 @@
 # TermiNest Wire Protocol v1 (TNST-v1) Specification
 
-**Status:** Authoritative Specification  
+**Status:** Authoritative Specification (Amended via ADR-0010)  
 **Version:** 1.0.0  
 **Date:** November 2026  
 **Target Systems:** Windows (Host/Guest), Linux (Host/Guest)  
@@ -10,7 +10,7 @@
 
 ## 1. Overview & Protocol Architecture
 
-TermiNest Wire Protocol v1 (`TNST-v1`) provides low-latency, multiplexed, binary-framed communication over point-to-point stream transports (specifically kernel-level Virtual Sockets: `AF_VSOCK` on Linux and `AF_HYPERV` on Windows).
+TermiNest Wire Protocol v1 (`TNST-v1`) provides low-latency, multiplexed, binary-framed communication over point-to-point stream transports (specifically kernel-level Virtual Sockets: `AF_VSOCK` on Linux and `AF_HYPERV` on Windows, or framed stream streams).
 
 It multiplexes four logical channels over a single bidirectional stream:
 - **Channel 0 (`0x0000`):** Control Channel (JSON-RPC 2.0 commands, responses, and events).
@@ -46,20 +46,20 @@ Every frame transmitted across the transport begins with an immutable, fixed-siz
 |---|---|---|---|---|
 | **Magic** | `0` | `4` | `u32` (Big-Endian) | Must equal `0x544E5354` (ASCII `"TNST"`). Rejects spurious streams immediately. |
 | **Version** | `4` | `1` | `u8` | Must equal `0x01`. Future revisions negotiate via handshake or version bump. |
-| **Flags** | `5` | `1` | `u8` bitfield | `0x00` = Plain uncompressed, `0x01` = LZ4, `0x02` = JPEG, `0x04` = Heartbeat. |
-| **Channel ID** | `6` | `2` | `u16` (Big-Endian) | `0x0000` (Control), `0x0001` (Video), `0x0002` (File), `0x0003` (Telemetry). |
-| **Payload Length** | `8` | `4` | `u32` (Big-Endian) | `0` to `16,777,216` (16 MB maximum). For Heartbeat frames (`0x04`), must be `0`. |
-| **CRC-32C Checksum** | `12` | `4` | `u32` (Big-Endian) | Castagnoli CRC-32C of the Payload bytes. For 0-length payload, value is `0x00000000`. |
+| **Flags** | `5` | `1` | `u8` bitfield | `0x00` = Plain uncompressed, `0x01` = LZ4, `0x02` = JPEG, `0x04` = Heartbeat. Bits 3..7 are reserved (must be 0). `LZ4` and `JPEG` are mutually exclusive. `HEARTBEAT` cannot specify compression. |
+| **Channel ID** | `6` | `2` | `u16` (Big-Endian) | `0x0000` (Control), `0x0001` (Video), `0x0002` (File), `0x0003` (Telemetry). Unknown channels trigger `ProtocolError::UnknownChannel`. |
+| **Payload Length** | `8` | `4` | `u32` (Big-Endian) | `0` to `16,777,216` (16 MB maximum). For Heartbeat frames (`0x04`), must be strictly `0`. |
+| **CRC-32C Checksum** | `12` | `4` | `u32` (Big-Endian) | Castagnoli CRC-32C of **Header Prefix (bytes 0..12) + Payload bytes** (per ADR-0010). For 0-length payload frames (Heartbeats), equals `crc32c(&header[0..12])`. |
 
 ### 2.2. Checksum Algorithm (Castagnoli CRC-32C)
 - **Polynomial:** `0x1EDC6F41` (reflected: `0x82F63B78`).
 - **Initial value:** `0xFFFFFFFF`.
 - **Final XOR:** `0xFFFFFFFF`.
 - **Standard verification vector:** ASCII string `123456789` (`0x313233343536373839`) evaluates to `0xE3069283`.
-- **Coverage:** Covers the payload bytes only. If the payload length is zero, the checksum field must be `0x00000000`.
+- **Coverage (ADR-0010):** Covers the 12-byte header prefix (`Magic`, `Version`, `Flags`, `ChannelId`, `PayloadLength`) and the entire payload. This protects the frame against header corruption, channel misrouting, and stream desynchronization.
 
 > [!IMPORTANT]
-> **Integrity vs. Authentication:** CRC-32C provides data integrity detection against accidental socket buffer corruption or hypervisor ring drops. It is **not** a cryptographic signature and does not protect against an active in-path adversary. Security is guaranteed by hardware hypervisor boundary isolation (`AF_VSOCK` / `AF_HYPERV` point-to-point ring buffers).
+> **Integrity vs. Authentication:** CRC-32C provides data integrity detection against accidental transmission bit flips and buffer drops. It is **not** a cryptographic signature and does not protect against an active in-path adversary. Peer authenticity and isolation rely on hardware hypervisor boundary isolation (`AF_VSOCK` / `AF_HYPERV` kernel ring buffers) or OS access controls.
 
 ---
 
@@ -68,7 +68,10 @@ Every frame transmitted across the transport begins with an immutable, fixed-siz
 ### 3.1. Channel 0: Control Channel (JSON-RPC 2.0)
 All control commands, agent tool actions, and lifecycle signals execute over Channel 0 as UTF-8 encoded JSON-RPC 2.0 objects.
 
-#### Standard Methods:
+#### Standard Messages:
+- `JsonRpcRequest<T>`: Standard request with `jsonrpc: "2.0"`, `method`, `params`, and `id` (`RequestId::String` or `RequestId::Number`).
+- `JsonRpcResponse<R>`: Standard response with `jsonrpc: "2.0"`, optional `result`, optional `error`, and optional `id` (`id: null` supported for parse errors).
+- `JsonRpcNotification<T>`: One-way notification without `id`.
 - `guest.handshake`: Announce OS distro, kernel, desktop environment, and active user session.
 - `guest.ping`: Low-latency keep-alive round-trip.
 - `desktop.capture_frame`: Request a single desktop screenshot.
@@ -113,10 +116,11 @@ Lightweight metrics emitted periodically by the guest daemon:
 
 ---
 
-## 4. Connection Lifecycle & Version Negotiation
+## 4. Connection Lifecycle & Error Recovery
 
-1. **Transport Connect:** Host initiates Vsock connection to guest CID 3 on port 10001 (or listens for guest connection depending on hypervisor topology).
+1. **Transport Connect:** Host initiates transport connection to guest CID 3 on port 10001 (or local stream endpoint).
 2. **Initial Handshake:** Immediately upon connection, guest transmits `guest.handshake` on Channel 0.
 3. **Handshake Verification:** Host validates `version == "1.0.0"` and returns `HandshakeResult`.
-4. **Heartbeats:** Either party may emit Heartbeat frames (`Flags = 0x04`, `PayloadLen = 0`) every 2,000ms.
-5. **Termination:** Clean shutdown occurs via `close()` or transport EOF. If 3 consecutive heartbeats are unacknowledged (6 seconds), connection is considered broken and reset.
+4. **Heartbeats:** Either party emits Heartbeat frames (`Flags = 0x04`, `PayloadLen = 0`) periodically.
+5. **Framing Errors & Decoder Poisoning:** Any framing violation (invalid magic, version, flags, or payload exceeding buffer capacity) marks the incremental decoder as poisoned (`ProtocolError::StreamPoisoned`), enforcing fail-closed connection reset rather than risky speculative re-synchronization.
+6. **Clean Termination:** Graceful close via `Transport::close()` drops the transmitter, notifying the remote receiver with EOF (`None`).

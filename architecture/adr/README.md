@@ -25,3 +25,4 @@ Every record captures the context, problem statement, alternatives considered, d
 | [ADR-0007](0007-desktop-viewer-and-terminal-graphics.md) | Terminal Desktop Viewer & Graphics Protocols | Accepted | CLI Viewer, Terminal Protocols |
 | [ADR-0008](0008-security-boundaries-and-network-isolation.md) | Security Boundaries & Network Isolation Tiers | Accepted | Security, Virtual Networking |
 | [ADR-0009](0009-vm-storage-format-and-state-management.md) | VM Storage Formats & Ephemeral State Management | Accepted | Storage, Lifecycle, Snapshots |
+| [ADR-0010](0010-wire-framing-integrity-and-header-checksum.md) | TNST Wire Framing Integrity & Header Checksum | Accepted | Wire Protocol, Framing, Security |

@@ -1,6 +1,6 @@
-use crate::crc::crc32c;
+use crate::crc::{crc32c, crc32c_update};
 use crate::error::ProtocolError;
-use crate::frame::{Frame, FrameHeader, HEADER_SIZE};
+use crate::frame::{Frame, FrameHeader, HEADER_PREFIX_SIZE, HEADER_SIZE};
 use bytes::{Buf, BytesMut};
 
 /// Default maximum buffer size for the stream decoder (32 MB).
@@ -15,6 +15,7 @@ pub const DEFAULT_MAX_BUFFER_SIZE: usize = 32 * 1024 * 1024;
 pub struct StreamDecoder {
     buffer: BytesMut,
     max_capacity: usize,
+    is_poisoned: bool,
 }
 
 impl Default for StreamDecoder {
@@ -34,6 +35,7 @@ impl StreamDecoder {
         Self {
             buffer: BytesMut::with_capacity(4096),
             max_capacity,
+            is_poisoned: false,
         }
     }
 
@@ -41,11 +43,31 @@ impl StreamDecoder {
     ///
     /// Rejects input if it causes the buffer to exceed `max_capacity` to prevent memory exhaustion attacks.
     pub fn ingest(&mut self, chunk: &[u8]) -> Result<(), ProtocolError> {
+        if self.is_poisoned {
+            return Err(ProtocolError::StreamPoisoned);
+        }
+
         if self.buffer.len().saturating_add(chunk.len()) > self.max_capacity {
+            self.is_poisoned = true;
             return Err(ProtocolError::BufferOverflow(self.max_capacity));
         }
         self.buffer.extend_from_slice(chunk);
         Ok(())
+    }
+
+    /// Returns the expected total byte length of the current incoming frame, if a valid
+    /// header is present in the buffer, or `Some(HEADER_SIZE)` if awaiting the header.
+    pub fn expected_frame_len(&self) -> Option<usize> {
+        if self.buffer.len() < HEADER_SIZE {
+            Some(HEADER_SIZE)
+        } else {
+            let header_bytes = &self.buffer[..HEADER_SIZE];
+            if let Ok(header) = FrameHeader::decode(header_bytes) {
+                Some(HEADER_SIZE + header.payload_len as usize)
+            } else {
+                None
+            }
+        }
     }
 
     /// Attempts to extract the next complete and verified `Frame` from the internal buffer.
@@ -55,6 +77,10 @@ impl StreamDecoder {
     /// - `Ok(None)` when more data is needed (partial header or partial payload).
     /// - `Err(ProtocolError)` when an invalid header or corrupted payload is detected.
     pub fn poll_next(&mut self) -> Result<Option<Frame>, ProtocolError> {
+        if self.is_poisoned {
+            return Err(ProtocolError::StreamPoisoned);
+        }
+
         if self.buffer.len() < HEADER_SIZE {
             // Need at least 16 bytes to decode the header
             return Ok(None);
@@ -62,19 +88,36 @@ impl StreamDecoder {
 
         // Peek header without consuming buffer
         let header_bytes = &self.buffer[..HEADER_SIZE];
-        let header = FrameHeader::decode(header_bytes)?;
+        let header = match FrameHeader::decode(header_bytes) {
+            Ok(h) => h,
+            Err(err) => {
+                // Fatal framing error: poison the stream decoder
+                self.is_poisoned = true;
+                return Err(err);
+            }
+        };
 
         let payload_len = header.payload_len as usize;
         let total_frame_len = HEADER_SIZE + payload_len;
+
+        // Verify that the requested frame fits within the configured maximum decoder capacity
+        if total_frame_len > self.max_capacity {
+            self.is_poisoned = true;
+            return Err(ProtocolError::PayloadTooLarge {
+                actual: header.payload_len,
+                max: (self.max_capacity.saturating_sub(HEADER_SIZE)) as u32,
+            });
+        }
 
         if self.buffer.len() < total_frame_len {
             // Header is valid, but full payload has not arrived yet
             return Ok(None);
         }
 
-        // Complete frame received: verify checksum before advancing buffer
+        // Complete frame received: verify ADR-0010 checksum (header prefix + payload)
+        let prefix_crc = crc32c(&self.buffer[..HEADER_PREFIX_SIZE]);
         let payload_slice = &self.buffer[HEADER_SIZE..total_frame_len];
-        let calculated_crc = crc32c(payload_slice);
+        let calculated_crc = crc32c_update(prefix_crc, payload_slice);
 
         if calculated_crc != header.checksum {
             // Discard the corrupted frame to avoid buffer stall
@@ -93,14 +136,20 @@ impl StreamDecoder {
         Ok(Some(Frame { header, payload }))
     }
 
+    /// Returns whether the stream decoder is in a poisoned state.
+    pub fn is_poisoned(&self) -> bool {
+        self.is_poisoned
+    }
+
     /// Returns the number of unparsed bytes currently in the buffer.
     pub fn buffered_len(&self) -> usize {
         self.buffer.len()
     }
 
-    /// Clears the internal buffer.
+    /// Clears the internal buffer and resets the poisoned state.
     pub fn clear(&mut self) {
         self.buffer.clear();
+        self.is_poisoned = false;
     }
 }
 
@@ -179,6 +228,22 @@ mod tests {
 
         let err = decoder.ingest(&large_chunk).unwrap_err();
         assert!(matches!(err, ProtocolError::BufferOverflow(100)));
+        assert!(decoder.is_poisoned());
+    }
+
+    #[test]
+    fn test_decoder_poisoning_on_invalid_header() {
+        let mut decoder = StreamDecoder::new();
+        let bad_header = [0x00u8; 16]; // bad magic
+        decoder.ingest(&bad_header).unwrap();
+
+        let err = decoder.poll_next().unwrap_err();
+        assert!(matches!(err, ProtocolError::InvalidMagic(_)));
+        assert!(decoder.is_poisoned());
+
+        // Subsequent poll must return StreamPoisoned
+        let err2 = decoder.poll_next().unwrap_err();
+        assert_eq!(err2, ProtocolError::StreamPoisoned);
     }
 
     #[test]

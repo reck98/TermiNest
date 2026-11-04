@@ -49,8 +49,14 @@ where
         }
 
         let encoded = frame.encode();
-        self.io.write_all(&encoded).await?;
-        self.io.flush().await?;
+        if let Err(e) = self.io.write_all(&encoded).await {
+            self.is_closed = true;
+            return Err(TransportError::Io(e));
+        }
+        if let Err(e) = self.io.flush().await {
+            self.is_closed = true;
+            return Err(TransportError::Io(e));
+        }
         Ok(())
     }
 
@@ -71,9 +77,10 @@ where
                 // EOF reached
                 self.is_closed = true;
                 if self.decoder.buffered_len() > 0 {
+                    let expected = self.decoder.expected_frame_len().unwrap_or(16);
                     return Err(TransportError::Protocol(
                         terminest_protocol::ProtocolError::IncompleteFrame {
-                            expected: 16,
+                            expected,
                             actual: self.decoder.buffered_len(),
                         },
                     ));

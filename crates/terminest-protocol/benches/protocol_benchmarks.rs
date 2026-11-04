@@ -5,73 +5,82 @@ use terminest_protocol::rpc::{
 };
 use terminest_protocol::{crc32c, ChannelId, Frame, FrameFlags, StreamDecoder};
 
+/// Runs a benchmark function across multiple sample runs after a dedicated warm-up pass.
+fn bench_multi_run<F>(
+    name: &str,
+    warm_iters: usize,
+    sample_runs: usize,
+    iters_per_run: usize,
+    mut op: F,
+) -> (f64, f64, f64)
+where
+    F: FnMut(),
+{
+    // 1. Warm-up pass
+    for _ in 0..warm_iters {
+        op();
+    }
+
+    // 2. Timed sample runs
+    let mut run_latencies_ns: Vec<f64> = Vec::with_capacity(sample_runs);
+    for _ in 0..sample_runs {
+        let start = Instant::now();
+        for _ in 0..iters_per_run {
+            op();
+        }
+        let elapsed = start.elapsed();
+        let ns_per_op = elapsed.as_nanos() as f64 / iters_per_run as f64;
+        run_latencies_ns.push(ns_per_op);
+    }
+
+    run_latencies_ns.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let min = run_latencies_ns[0];
+    let max = run_latencies_ns[run_latencies_ns.len() - 1];
+    let median = run_latencies_ns[run_latencies_ns.len() / 2];
+
+    println!(
+        "{:<24} median: {:>8.2} ns/op  (min: {:>8.2} ns, max: {:>8.2} ns) [{} samples × {} ops]",
+        name, median, min, max, sample_runs, iters_per_run
+    );
+
+    (median, min, max)
+}
+
 fn bench_crc32c() {
-    println!("=== CRC-32C Throughput Benchmarks ===");
+    println!("=== 1. Castagnoli CRC-32C Throughput Benchmarks ===");
 
-    // 1. Small payload (64 bytes)
+    // Small payload (64 bytes)
     let small_data = vec![0x55u8; 64];
-    let iters = 1_000_000;
-    let start = Instant::now();
-    for _ in 0..iters {
+    let (med, _, _) = bench_multi_run("CRC-32C (64 B)", 50_000, 5, 200_000, || {
         std::hint::black_box(crc32c(std::hint::black_box(&small_data)));
-    }
-    let elapsed = start.elapsed();
-    let total_bytes = small_data.len() as f64 * iters as f64;
-    let mb_per_sec = (total_bytes / (1024.0 * 1024.0)) / elapsed.as_secs_f64();
-    println!(
-        "CRC-32C (64 bytes):   {:.2} ns/op, {:.2} MB/s ({} iters in {:.3?})",
-        elapsed.as_nanos() as f64 / iters as f64,
-        mb_per_sec,
-        iters,
-        elapsed
-    );
+    });
+    let mb_per_sec = (64.0 / (1024.0 * 1024.0)) / (med * 1e-9);
+    println!("  -> Throughput at median: {:.2} MB/s", mb_per_sec);
 
-    // 2. Medium payload (64 KB)
+    // Medium payload (64 KB)
     let medium_data = vec![0xAAu8; 64 * 1024];
-    let iters_med = 50_000;
-    let start = Instant::now();
-    for _ in 0..iters_med {
+    let (med, _, _) = bench_multi_run("CRC-32C (64 KB)", 500, 5, 10_000, || {
         std::hint::black_box(crc32c(std::hint::black_box(&medium_data)));
-    }
-    let elapsed = start.elapsed();
-    let total_bytes = medium_data.len() as f64 * iters_med as f64;
-    let mb_per_sec = (total_bytes / (1024.0 * 1024.0)) / elapsed.as_secs_f64();
-    println!(
-        "CRC-32C (64 KB):     {:.2} us/op, {:.2} MB/s ({} iters in {:.3?})",
-        (elapsed.as_nanos() as f64 / iters_med as f64) / 1000.0,
-        mb_per_sec,
-        iters_med,
-        elapsed
-    );
+    });
+    let mb_per_sec = (65536.0 / (1024.0 * 1024.0)) / (med * 1e-9);
+    println!("  -> Throughput at median: {:.2} MB/s", mb_per_sec);
 
-    // 3. Large payload (2 MB screenshot)
+    // Large payload (2 MB screenshot)
     let large_data = vec![0x33u8; 2 * 1024 * 1024];
-    let iters_large = 2_000;
-    let start = Instant::now();
-    for _ in 0..iters_large {
+    let (med, _, _) = bench_multi_run("CRC-32C (2 MB)", 50, 5, 500, || {
         std::hint::black_box(crc32c(std::hint::black_box(&large_data)));
-    }
-    let elapsed = start.elapsed();
-    let total_bytes = large_data.len() as f64 * iters_large as f64;
-    let mb_per_sec = (total_bytes / (1024.0 * 1024.0)) / elapsed.as_secs_f64();
-    println!(
-        "CRC-32C (2 MB frame): {:.2} ms/op, {:.2} MB/s ({} iters in {:.3?})",
-        (elapsed.as_nanos() as f64 / iters_large as f64) / 1_000_000.0,
-        mb_per_sec,
-        iters_large,
-        elapsed
-    );
+    });
+    let mb_per_sec = (2.0 * 1024.0) / (med * 1e-6);
+    println!("  -> Throughput at median: {:.2} MB/s", mb_per_sec);
     println!();
 }
 
 fn bench_frame_codec() {
-    println!("=== Frame Encode / Decode Benchmarks ===");
+    println!("=== 2. TNST-v1 Frame Encode / Decode (ADR-0010 Full Frame Checksum) ===");
 
-    // 1. Small Control Frame (64 bytes)
+    // Small control frame (64 bytes)
     let small_payload = Bytes::from(vec![0x7Eu8; 64]);
-    let iters = 500_000;
-    let start = Instant::now();
-    for _ in 0..iters {
+    bench_multi_run("Frame Encode (64 B)", 10_000, 5, 100_000, || {
         let frame = Frame::new(
             ChannelId::Control,
             FrameFlags::PLAIN,
@@ -79,34 +88,17 @@ fn bench_frame_codec() {
         )
         .unwrap();
         let _ = std::hint::black_box(frame.encode());
-    }
-    let elapsed = start.elapsed();
-    println!(
-        "Frame Encode (64 B):  {:.2} ns/op ({} iters in {:.3?})",
-        elapsed.as_nanos() as f64 / iters as f64,
-        iters,
-        elapsed
-    );
+    });
 
     let frame = Frame::new(ChannelId::Control, FrameFlags::PLAIN, small_payload).unwrap();
     let encoded = frame.encode();
-    let start = Instant::now();
-    for _ in 0..iters {
+    bench_multi_run("Frame Decode (64 B)", 10_000, 5, 100_000, || {
         let _ = std::hint::black_box(Frame::decode(std::hint::black_box(&encoded))).unwrap();
-    }
-    let elapsed = start.elapsed();
-    println!(
-        "Frame Decode (64 B):  {:.2} ns/op ({} iters in {:.3?})",
-        elapsed.as_nanos() as f64 / iters as f64,
-        iters,
-        elapsed
-    );
+    });
 
-    // 2. Large Frame (2 MB video screenshot)
+    // Large 2 MB video frame
     let large_payload = Bytes::from(vec![0x88u8; 2 * 1024 * 1024]);
-    let iters_large = 1_000;
-    let start = Instant::now();
-    for _ in 0..iters_large {
+    bench_multi_run("Frame Encode (2 MB)", 10, 5, 200, || {
         let frame = Frame::new(
             ChannelId::Video,
             FrameFlags::JPEG,
@@ -114,56 +106,32 @@ fn bench_frame_codec() {
         )
         .unwrap();
         let _ = std::hint::black_box(frame.encode());
-    }
-    let elapsed = start.elapsed();
-    println!(
-        "Frame Encode (2 MB):  {:.2} ms/op ({} iters in {:.3?})",
-        (elapsed.as_nanos() as f64 / iters_large as f64) / 1_000_000.0,
-        iters_large,
-        elapsed
-    );
+    });
 
     let frame_large = Frame::new(ChannelId::Video, FrameFlags::JPEG, large_payload).unwrap();
     let encoded_large = frame_large.encode();
-    let start = Instant::now();
-    for _ in 0..iters_large {
+    bench_multi_run("Frame Decode (2 MB)", 10, 5, 200, || {
         let _ = std::hint::black_box(Frame::decode(std::hint::black_box(&encoded_large))).unwrap();
-    }
-    let elapsed = start.elapsed();
-    println!(
-        "Frame Decode (2 MB):  {:.2} ms/op ({} iters in {:.3?})",
-        (elapsed.as_nanos() as f64 / iters_large as f64) / 1_000_000.0,
-        iters_large,
-        elapsed
-    );
+    });
     println!();
 }
 
 fn bench_stream_decoder() {
-    println!("=== StreamDecoder Incremental Ingestion ===");
+    println!("=== 3. Incremental StreamDecoder Ingest + Poll ===");
     let payload = Bytes::from(vec![0x12u8; 128]);
     let frame = Frame::control(payload).unwrap();
     let encoded = frame.encode();
 
     let mut decoder = StreamDecoder::new();
-    let iters = 200_000;
-    let start = Instant::now();
-    for _ in 0..iters {
+    bench_multi_run("Decoder Ingest+Poll", 10_000, 5, 50_000, || {
         decoder.ingest(&encoded).unwrap();
         let _ = std::hint::black_box(decoder.poll_next()).unwrap();
-    }
-    let elapsed = start.elapsed();
-    println!(
-        "Decoder Ingest+Poll:  {:.2} ns/op ({} frames in {:.3?})",
-        elapsed.as_nanos() as f64 / iters as f64,
-        iters,
-        elapsed
-    );
+    });
     println!();
 }
 
 fn bench_jsonrpc() {
-    println!("=== JSON-RPC 2.0 Serialization Benchmarks ===");
+    println!("=== 4. JSON-RPC 2.0 Serialization Benchmarks ===");
 
     let req = JsonRpcRequest::new(
         "desktop.mouse_click",
@@ -177,34 +145,16 @@ fn bench_jsonrpc() {
         RequestId::Number(1001),
     );
 
-    let iters = 200_000;
-    let start = Instant::now();
-    for _ in 0..iters {
+    bench_multi_run("JSON-RPC Serialize", 10_000, 5, 50_000, || {
         let _ = std::hint::black_box(serde_json::to_string(std::hint::black_box(&req))).unwrap();
-    }
-    let elapsed = start.elapsed();
-    println!(
-        "JSON-RPC Serialize:   {:.2} ns/op ({} iters in {:.3?})",
-        elapsed.as_nanos() as f64 / iters as f64,
-        iters,
-        elapsed
-    );
+    });
 
     let serialized = serde_json::to_string(&req).unwrap();
-    let start = Instant::now();
-    for _ in 0..iters {
+    bench_multi_run("JSON-RPC Deserialize", 10_000, 5, 50_000, || {
         let _parsed: JsonRpcRequest<MouseClickParams> =
             std::hint::black_box(serde_json::from_str(std::hint::black_box(&serialized))).unwrap();
-    }
-    let elapsed = start.elapsed();
-    println!(
-        "JSON-RPC Deserialize: {:.2} ns/op ({} iters in {:.3?})",
-        elapsed.as_nanos() as f64 / iters as f64,
-        iters,
-        elapsed
-    );
+    });
 
-    // Handshake payload benchmark
     let handshake_req = JsonRpcRequest::new(
         "guest.handshake",
         HandshakeParams {
@@ -225,29 +175,25 @@ fn bench_jsonrpc() {
     );
     let serialized_handshake = serde_json::to_string(&handshake_req).unwrap();
 
-    let iters_hs = 100_000;
-    let start = Instant::now();
-    for _ in 0..iters_hs {
+    bench_multi_run("Handshake Deserialize", 5_000, 5, 20_000, || {
         let _parsed: JsonRpcRequest<HandshakeParams> = std::hint::black_box(serde_json::from_str(
             std::hint::black_box(&serialized_handshake),
         ))
         .unwrap();
-    }
-    let elapsed = start.elapsed();
-    println!(
-        "Handshake Deserialize:{:.2} ns/op ({} iters in {:.3?})",
-        elapsed.as_nanos() as f64 / iters_hs as f64,
-        iters_hs,
-        elapsed
-    );
+    });
     println!();
 }
 
 fn main() {
-    println!("TermiNest M0 Performance Benchmark Suite");
+    println!("============================================================");
+    println!("TermiNest M0 Multi-Sample Performance Benchmark Suite");
+    println!("Methodology: Dedicated warm-up pass + 5 timed sample runs");
     println!("Hardware: 12th Gen Intel Core i5-12450H (x86_64)");
-    println!("Build Profile: Release (--release)");
-    println!("------------------------------------------------------------");
+    println!("OS: Windows 11 Home 64-bit");
+    println!("Profile: Release (--release)");
+    println!("Scope: In-memory serialization, framing, and CRC only");
+    println!("============================================================");
+    println!();
 
     bench_crc32c();
     bench_frame_codec();
