@@ -28,6 +28,9 @@ pub enum CoreError {
     #[error("Concurrent operation conflict on machine '{0}': {1}")]
     ConcurrencyConflict(String, String),
 
+    #[error("Operation aborted: {0}")]
+    OperationAborted(String),
+
     #[error("File system I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -77,6 +80,9 @@ pub enum PersistenceError {
 
     #[error("Machine name '{0}' collision in repository")]
     NameCollision(MachineName),
+
+    #[error("Lock acquisition timed out after {1:?} on '{0}'")]
+    LockTimeout(PathBuf, std::time::Duration),
 
     #[error("I/O error during persistence: {0}")]
     Io(#[from] std::io::Error),

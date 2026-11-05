@@ -3,12 +3,13 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::domain::{MachineId, MachineName, MachineState};
+use crate::domain::{AuditRecord, MachineId, MachineName, MachineState};
 use crate::error::PersistenceError;
-use crate::persistence::{MachineRecord, MachineRepository};
+use crate::persistence::{AuditLogger, FileLock, MachineRecord, MachineRepository};
 
 /// Local filesystem-backed machine repository implementing atomic JSON persistence.
 #[derive(Debug, Clone)]
@@ -43,6 +44,16 @@ impl FilesystemMachineRepository {
     /// Returns the path to the machine directory for a specific MachineId.
     pub fn machine_dir(&self, id: &MachineId) -> PathBuf {
         self.machines_dir.join(id.to_string())
+    }
+
+    /// Returns the path to the repository-wide lock file.
+    pub fn repo_lock_path(&self) -> PathBuf {
+        self.machines_dir.join(".repo.lock")
+    }
+
+    /// Returns the path to a machine's lock file.
+    pub fn machine_lock_path(&self, id: &MachineId) -> PathBuf {
+        self.machine_dir(id).join(".machine.lock")
     }
 
     fn machine_file(&self, id: &MachineId) -> PathBuf {
@@ -105,6 +116,35 @@ impl FilesystemMachineRepository {
 
 #[async_trait]
 impl MachineRepository for FilesystemMachineRepository {
+    async fn acquire_repo_lock(&self, timeout: Duration) -> Result<FileLock, PersistenceError> {
+        FileLock::acquire_exclusive_async(self.repo_lock_path(), timeout).await
+    }
+
+    async fn acquire_machine_lock(
+        &self,
+        id: &MachineId,
+        timeout: Duration,
+    ) -> Result<FileLock, PersistenceError> {
+        FileLock::acquire_exclusive_async(self.machine_lock_path(id), timeout).await
+    }
+
+    async fn append_audit_event(
+        &self,
+        id: &MachineId,
+        record: &AuditRecord,
+    ) -> Result<(), PersistenceError> {
+        let dir = self.machine_dir(id);
+        AuditLogger::append(&dir, record)
+    }
+
+    async fn read_audit_events(
+        &self,
+        id: &MachineId,
+    ) -> Result<Vec<AuditRecord>, PersistenceError> {
+        let dir = self.machine_dir(id);
+        AuditLogger::read_all(&dir)
+    }
+
     async fn save(&self, record: &MachineRecord) -> Result<(), PersistenceError> {
         let _guard = self.lock.lock().await;
 

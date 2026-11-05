@@ -187,4 +187,65 @@ mod tests {
             .await
             .expect("stopped");
     }
+
+    #[tokio::test]
+    async fn test_mock_backend_concurrent_state_file_synchronization() {
+        use tempfile::tempdir;
+        let temp = tempdir().expect("tempdir");
+        let state_file = temp.path().join("mock_backend.json");
+
+        // Two independent backend instances sharing the same state file (simulating separate processes)
+        let backend1 = MockHypervisorBackend::with_state_file(
+            HypervisorCapabilities::default(),
+            Some(state_file.clone()),
+        );
+        let backend2 = MockHypervisorBackend::with_state_file(
+            HypervisorCapabilities::default(),
+            Some(state_file.clone()),
+        );
+
+        let id1 = MachineId::new();
+        let id2 = MachineId::new();
+        let config1 = sample_config(id1, "vm-1");
+        let config2 = sample_config(id2, "vm-2");
+
+        // Process 1 creates vm-1
+        backend1
+            .create_machine(&config1)
+            .await
+            .expect("vm-1 created");
+
+        // Process 2 creates vm-2
+        backend2
+            .create_machine(&config2)
+            .await
+            .expect("vm-2 created");
+
+        // Process 1 starts vm-1
+        backend1.start_machine(&id1).await.expect("vm-1 started");
+
+        // Process 2 starts vm-2
+        backend2.start_machine(&id2).await.expect("vm-2 started");
+
+        // A third fresh process reads the state file from disk
+        let backend3 = MockHypervisorBackend::with_state_file(
+            HypervisorCapabilities::default(),
+            Some(state_file),
+        );
+
+        // BOTH machines must exist and be Running!
+        let status1 = backend3
+            .get_machine_status(&id1)
+            .await
+            .expect("vm-1 status");
+        let status2 = backend3
+            .get_machine_status(&id2)
+            .await
+            .expect("vm-2 status");
+
+        assert_eq!(status1.state, MachineState::Running);
+        assert_eq!(status2.state, MachineState::Running);
+        assert!(status1.pid.is_some());
+        assert!(status2.pid.is_some());
+    }
 }

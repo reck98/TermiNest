@@ -13,6 +13,7 @@ use crate::backend::{
 };
 use crate::domain::{HypervisorType, MachineConfig, MachineId, MachineState};
 use crate::error::HypervisorError;
+use crate::persistence::FileLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MockMachineEntry {
@@ -86,15 +87,93 @@ impl MockHypervisorBackend {
         }
     }
 
-    fn persist_state(&self, machines: &HashMap<MachineId, MockMachineEntry>) {
+    fn lock_path(&self) -> Option<PathBuf> {
+        self.state_file.as_ref().map(|p| p.with_extension("lock"))
+    }
+
+    async fn acquire_backend_lock(&self) -> Result<Option<FileLock>, HypervisorError> {
+        if let Some(lock_path) = self.lock_path() {
+            let lock = FileLock::acquire_exclusive_async(&lock_path, Duration::from_secs(5))
+                .await
+                .map_err(|e| {
+                    HypervisorError::ExecutionFailed(format!(
+                        "Timed out acquiring mock backend lock: {e}"
+                    ))
+                })?;
+            Ok(Some(lock))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn reload_from_disk(&self) -> Result<HashMap<MachineId, MockMachineEntry>, HypervisorError> {
+        if let Some(ref path) = self.state_file {
+            if path.exists() {
+                let bytes = fs::read(path).map_err(|e| {
+                    HypervisorError::ExecutionFailed(format!(
+                        "Failed to read mock backend state file '{}': {e}",
+                        path.display()
+                    ))
+                })?;
+                let map: HashMap<MachineId, MockMachineEntry> = serde_json::from_slice(&bytes)
+                    .map_err(|e| {
+                        HypervisorError::ExecutionFailed(format!(
+                            "Corrupt mock backend state file at '{}': {e}",
+                            path.display()
+                        ))
+                    })?;
+                return Ok(map);
+            }
+        }
+        Ok(HashMap::new())
+    }
+
+    fn persist_state_atomic(
+        &self,
+        machines: &HashMap<MachineId, MockMachineEntry>,
+    ) -> Result<(), HypervisorError> {
         if let Some(ref path) = self.state_file {
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            if let Ok(json) = serde_json::to_vec_pretty(machines) {
-                let _ = fs::write(path, json);
-            }
+            let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+            let json = serde_json::to_vec_pretty(machines).map_err(|e| {
+                HypervisorError::ExecutionFailed(format!(
+                    "Failed to serialize mock backend state: {e}"
+                ))
+            })?;
+
+            let mut file = fs::File::create(&tmp_path).map_err(|e| {
+                HypervisorError::ExecutionFailed(format!(
+                    "Failed to create temporary mock state file: {e}"
+                ))
+            })?;
+
+            use std::io::Write;
+            file.write_all(&json).map_err(|e| {
+                let _ = fs::remove_file(&tmp_path);
+                HypervisorError::ExecutionFailed(format!(
+                    "Failed to write temporary mock state file: {e}"
+                ))
+            })?;
+
+            file.sync_all().map_err(|e| {
+                let _ = fs::remove_file(&tmp_path);
+                HypervisorError::ExecutionFailed(format!(
+                    "Failed to sync temporary mock state file: {e}"
+                ))
+            })?;
+
+            drop(file);
+
+            fs::rename(&tmp_path, path).map_err(|e| {
+                let _ = fs::remove_file(&tmp_path);
+                HypervisorError::ExecutionFailed(format!(
+                    "Failed to atomically replace mock state file: {e}"
+                ))
+            })?;
         }
+        Ok(())
     }
 
     /// Injects a deterministic failure for subsequent operations.
@@ -165,7 +244,12 @@ impl HypervisorBackend for MockHypervisorBackend {
     async fn create_machine(&self, config: &MachineConfig) -> Result<(), HypervisorError> {
         self.check_failure("create")?;
 
+        let _lock_guard = self.acquire_backend_lock().await?;
         let mut lock = self.machines.write().await;
+        if self.state_file.is_some() {
+            *lock = self.reload_from_disk()?;
+        }
+
         if lock.contains_key(&config.id) {
             return Err(HypervisorError::MachineAlreadyExists(config.id));
         }
@@ -180,14 +264,19 @@ impl HypervisorBackend for MockHypervisorBackend {
             },
         );
 
-        self.persist_state(&lock);
+        self.persist_state_atomic(&lock)?;
         Ok(())
     }
 
     async fn start_machine(&self, id: &MachineId) -> Result<BackendMachineStatus, HypervisorError> {
         self.check_failure("start")?;
 
+        let _lock_guard = self.acquire_backend_lock().await?;
         let mut lock = self.machines.write().await;
+        if self.state_file.is_some() {
+            *lock = self.reload_from_disk()?;
+        }
+
         let entry = lock
             .get_mut(id)
             .ok_or(HypervisorError::MachineNotFound(*id))?;
@@ -204,7 +293,7 @@ impl HypervisorBackend for MockHypervisorBackend {
         entry.pid = Some(pid);
         entry.started_at_secs = Some(current_epoch_secs());
 
-        self.persist_state(&lock);
+        self.persist_state_atomic(&lock)?;
 
         Ok(BackendMachineStatus {
             id: *id,
@@ -223,7 +312,12 @@ impl HypervisorBackend for MockHypervisorBackend {
     ) -> Result<(), HypervisorError> {
         self.check_failure("stop")?;
 
+        let _lock_guard = self.acquire_backend_lock().await?;
         let mut lock = self.machines.write().await;
+        if self.state_file.is_some() {
+            *lock = self.reload_from_disk()?;
+        }
+
         let entry = lock
             .get_mut(id)
             .ok_or(HypervisorError::MachineNotFound(*id))?;
@@ -239,7 +333,7 @@ impl HypervisorBackend for MockHypervisorBackend {
         entry.pid = None;
         entry.started_at_secs = None;
 
-        self.persist_state(&lock);
+        self.persist_state_atomic(&lock)?;
         Ok(())
     }
 
@@ -250,7 +344,12 @@ impl HypervisorBackend for MockHypervisorBackend {
             return Err(HypervisorError::UnsupportedOperation("pause", "mock"));
         }
 
+        let _lock_guard = self.acquire_backend_lock().await?;
         let mut lock = self.machines.write().await;
+        if self.state_file.is_some() {
+            *lock = self.reload_from_disk()?;
+        }
+
         let entry = lock
             .get_mut(id)
             .ok_or(HypervisorError::MachineNotFound(*id))?;
@@ -263,7 +362,7 @@ impl HypervisorBackend for MockHypervisorBackend {
         }
 
         entry.state = MachineState::Paused;
-        self.persist_state(&lock);
+        self.persist_state_atomic(&lock)?;
         Ok(())
     }
 
@@ -274,7 +373,12 @@ impl HypervisorBackend for MockHypervisorBackend {
             return Err(HypervisorError::UnsupportedOperation("resume", "mock"));
         }
 
+        let _lock_guard = self.acquire_backend_lock().await?;
         let mut lock = self.machines.write().await;
+        if self.state_file.is_some() {
+            *lock = self.reload_from_disk()?;
+        }
+
         let entry = lock
             .get_mut(id)
             .ok_or(HypervisorError::MachineNotFound(*id))?;
@@ -287,14 +391,19 @@ impl HypervisorBackend for MockHypervisorBackend {
         }
 
         entry.state = MachineState::Running;
-        self.persist_state(&lock);
+        self.persist_state_atomic(&lock)?;
         Ok(())
     }
 
     async fn delete_machine(&self, id: &MachineId) -> Result<(), HypervisorError> {
         self.check_failure("delete")?;
 
+        let _lock_guard = self.acquire_backend_lock().await?;
         let mut lock = self.machines.write().await;
+        if self.state_file.is_some() {
+            *lock = self.reload_from_disk()?;
+        }
+
         let entry = lock.get(id).ok_or(HypervisorError::MachineNotFound(*id))?;
 
         if entry.state == MachineState::Running {
@@ -304,7 +413,7 @@ impl HypervisorBackend for MockHypervisorBackend {
         }
 
         lock.remove(id);
-        self.persist_state(&lock);
+        self.persist_state_atomic(&lock)?;
         Ok(())
     }
 
@@ -314,7 +423,12 @@ impl HypervisorBackend for MockHypervisorBackend {
     ) -> Result<BackendMachineStatus, HypervisorError> {
         self.check_failure("status")?;
 
-        let lock = self.machines.read().await;
+        let _lock_guard = self.acquire_backend_lock().await?;
+        let mut lock = self.machines.write().await;
+        if self.state_file.is_some() {
+            *lock = self.reload_from_disk()?;
+        }
+
         let entry = lock.get(id).ok_or(HypervisorError::MachineNotFound(*id))?;
 
         let uptime_secs = entry
