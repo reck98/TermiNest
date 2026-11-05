@@ -1,5 +1,6 @@
 use chrono::Utc;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -273,6 +274,37 @@ pub async fn handle_delete(
     args: DeleteArgs,
     json: bool,
 ) -> Result<(), CoreError> {
+    if !args.confirm {
+        if io::stdin().is_terminal() {
+            // Interactive terminal prompt
+            eprint!(
+                "Are you sure you want to delete machine '{}'? [y/N]: ",
+                args.machine
+            );
+            io::stderr().flush().map_err(CoreError::Io)?;
+
+            let mut input = String::new();
+            let bytes = io::stdin().read_line(&mut input).map_err(CoreError::Io)?;
+            if bytes == 0 {
+                return Err(CoreError::OperationAborted(
+                    "Deletion aborted: EOF received on confirmation prompt".into(),
+                ));
+            }
+            let trimmed = input.trim();
+            if !trimmed.eq_ignore_ascii_case("y") && !trimmed.eq_ignore_ascii_case("yes") {
+                return Err(CoreError::OperationAborted(format!(
+                    "Deletion of machine '{}' aborted by user",
+                    args.machine
+                )));
+            }
+        } else {
+            // Non-interactive execution requires explicit --confirm flag
+            return Err(CoreError::OperationAborted(
+                "Deletion in non-interactive mode requires the '--confirm' flag".into(),
+            ));
+        }
+    }
+
     orchestrator
         .delete_machine(&args.machine, args.force)
         .await?;

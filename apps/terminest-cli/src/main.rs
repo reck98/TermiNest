@@ -13,7 +13,6 @@ use config::TermiNestPaths;
 use formatter::print_error;
 use terminest_core::backend::MockHypervisorBackend;
 use terminest_core::domain::HypervisorType;
-use terminest_core::error::CoreError;
 use terminest_core::orchestrator::{BackendRegistry, Orchestrator};
 use terminest_core::persistence::FilesystemMachineRepository;
 
@@ -39,14 +38,14 @@ async fn main() -> ExitCode {
                     &format!("Failed to initialize data directory: {e}"),
                     cli.json,
                 );
-                return ExitCode::from(2);
+                return ExitCode::from(1);
             }
 
             let repo = match FilesystemMachineRepository::new(&paths.base_dir) {
                 Ok(r) => Arc::new(r),
                 Err(e) => {
                     print_error(&format!("Failed to open repository: {e}"), cli.json);
-                    return ExitCode::from(2);
+                    return ExitCode::from(1);
                 }
             };
 
@@ -124,18 +123,7 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             print_error(&err.to_string(), cli.json);
-            match err {
-                CoreError::Validation(_)
-                | CoreError::Lifecycle(_)
-                | CoreError::MachineNotFound(_)
-                | CoreError::MachineAlreadyExists(_)
-                | CoreError::ConcurrencyConflict(_, _)
-                | CoreError::Serialization(_) => ExitCode::from(1),
-
-                CoreError::Backend(_) | CoreError::Persistence(_) | CoreError::Io(_) => {
-                    ExitCode::from(2)
-                }
-            }
+            ExitCode::from(1)
         }
     }
 }

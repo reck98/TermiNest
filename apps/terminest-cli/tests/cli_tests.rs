@@ -159,8 +159,10 @@ mod tests {
         assert!(stdout_resume.contains("resumed"));
 
         // 9. Attempt to delete running machine without force (must fail with exit code 1)
-        let (code_del_fail, _, stderr_del_fail) =
-            run_terminest(&["machine", "delete", "cli-dev-box"], temp.path());
+        let (code_del_fail, _, stderr_del_fail) = run_terminest(
+            &["machine", "delete", "cli-dev-box", "--confirm"],
+            temp.path(),
+        );
         assert_eq!(code_del_fail, 1);
         assert!(stderr_del_fail.contains("Cannot delete machine while it is running"));
 
@@ -170,9 +172,11 @@ mod tests {
         assert_eq!(code_stop, 0);
         assert!(stdout_stop.contains("stopped"));
 
-        // 11. Delete stopped machine
-        let (code_del, stdout_del, _) =
-            run_terminest(&["machine", "delete", "cli-dev-box"], temp.path());
+        // 11. Delete stopped machine with --confirm
+        let (code_del, stdout_del, _) = run_terminest(
+            &["machine", "delete", "cli-dev-box", "--confirm"],
+            temp.path(),
+        );
         assert_eq!(code_del, 0);
         assert!(stdout_del.contains("successfully deleted"));
 
@@ -298,5 +302,148 @@ mod tests {
             run_terminest(&["create", "--name", "../escape"], temp.path());
         assert_eq!(code_trav, 1);
         assert!(stderr_trav.contains("Path traversal or illegal path detected"));
+
+        // CLI usage/argument errors must return exit code 2
+        let (code_usage, _, stderr_usage) = run_terminest(&["--bad-flag"], temp.path());
+        assert_eq!(code_usage, 2);
+        assert!(stderr_usage.contains("unexpected argument '--bad-flag'"));
+
+        let (code_missing, _, stderr_missing) = run_terminest(&["start"], temp.path());
+        assert_eq!(code_missing, 2);
+        assert!(stderr_missing.contains("required arguments were not provided"));
+    }
+
+    #[test]
+    fn test_cli_delete_confirmation_semantics() {
+        let temp = tempdir().expect("tempdir");
+
+        run_terminest(&["init"], temp.path());
+        run_terminest(&["create", "--name", "confirm-vm"], temp.path());
+
+        // 1. Non-interactive delete without --confirm must fail with exit code 1
+        let (code_no_conf, _, stderr_no_conf) =
+            run_terminest(&["delete", "confirm-vm"], temp.path());
+        assert_eq!(code_no_conf, 1);
+        assert!(stderr_no_conf.contains("requires the '--confirm' flag"));
+
+        // Machine still exists
+        let (code_ls1, stdout_ls1, _) = run_terminest(&["ls"], temp.path());
+        assert_eq!(code_ls1, 0);
+        assert!(stdout_ls1.contains("confirm-vm"));
+
+        // 2. Start machine
+        run_terminest(&["start", "confirm-vm"], temp.path());
+
+        // 3. Delete running machine with --force but without --confirm -> fails with confirmation required
+        let (code_force_no_conf, _, stderr_force_no_conf) =
+            run_terminest(&["delete", "confirm-vm", "--force"], temp.path());
+        assert_eq!(code_force_no_conf, 1);
+        assert!(stderr_force_no_conf.contains("requires the '--confirm' flag"));
+
+        // 4. Delete running machine with --confirm but without --force -> fails with lifecycle running error
+        let (code_conf_no_force, _, stderr_conf_no_force) =
+            run_terminest(&["delete", "confirm-vm", "--confirm"], temp.path());
+        assert_eq!(code_conf_no_force, 1);
+        assert!(stderr_conf_no_force.contains("Cannot delete machine while it is running"));
+
+        // 5. Delete running machine with both --force and --confirm -> succeeds with exit code 0
+        let (code_del_ok, stdout_del_ok, _) = run_terminest(
+            &["delete", "confirm-vm", "--force", "--confirm"],
+            temp.path(),
+        );
+        assert_eq!(code_del_ok, 0);
+        assert!(stdout_del_ok.contains("successfully deleted"));
+
+        // Verify machine is deleted
+        let (_, stdout_empty, _) = run_terminest(&["ls"], temp.path());
+        assert!(stdout_empty.contains("No virtual machines registered"));
+    }
+
+    #[test]
+    fn test_cli_audit_log_written_to_disk() {
+        let temp = tempdir().expect("tempdir");
+
+        run_terminest(&["init"], temp.path());
+        let (_, stdout_create, _) = run_terminest(&["create", "--name", "audit-vm"], temp.path());
+        assert!(stdout_create.contains("successfully created"));
+
+        run_terminest(&["start", "audit-vm"], temp.path());
+        run_terminest(&["stop", "audit-vm"], temp.path());
+
+        // Locate audit.jsonl in machines directory
+        let machines_dir = temp.path().join("machines");
+        let entries = std::fs::read_dir(&machines_dir).expect("read machines dir");
+        let mut found_audit = false;
+
+        for entry in entries.flatten() {
+            let audit_file = entry.path().join("audit.jsonl");
+            if audit_file.exists() {
+                found_audit = true;
+                let content = std::fs::read_to_string(&audit_file).expect("read audit.jsonl");
+                assert!(!content.is_empty(), "audit.jsonl must not be empty!");
+
+                let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+                assert_eq!(lines.len(), 3, "Expected 3 events: create, start, stop");
+
+                for line in &lines {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(line).expect("valid JSON line");
+                    assert_eq!(parsed["schema_version"], "1.0.0");
+                    assert_eq!(parsed["result"], "success");
+                    assert!(parsed["timestamp"].is_string());
+                }
+
+                let e0: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+                let e1: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+                let e2: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+
+                assert_eq!(e0["action"], "create");
+                assert_eq!(e1["action"], "start");
+                assert_eq!(e2["action"], "stop");
+            }
+        }
+
+        assert!(found_audit, "audit.jsonl was not found on disk");
+    }
+
+    #[test]
+    fn test_cli_cross_process_create_collision_race() {
+        let temp = tempdir().expect("tempdir");
+        run_terminest(&["init"], temp.path());
+
+        let temp_path = temp.path().to_path_buf();
+        let temp_path_clone = temp_path.clone();
+
+        // Spawn two threads, each executing a separate CLI process attempting to create the identical machine name
+        let handle1 = std::thread::spawn(move || {
+            run_terminest(&["create", "--name", "racing-vm"], &temp_path)
+        });
+        let handle2 = std::thread::spawn(move || {
+            run_terminest(&["create", "--name", "racing-vm"], &temp_path_clone)
+        });
+
+        let (code1, stdout1, stderr1) = handle1.join().unwrap();
+        let (code2, stdout2, stderr2) = handle2.join().unwrap();
+
+        // Exactly one process must succeed (exit code 0), and the other must fail with exit code 1
+        let (win_code, win_stdout, lose_code, lose_stderr) = if code1 == 0 {
+            (code1, stdout1, code2, stderr2)
+        } else {
+            (code2, stdout2, code1, stderr1)
+        };
+
+        assert_eq!(win_code, 0);
+        assert!(win_stdout.contains("successfully created"));
+
+        assert_eq!(lose_code, 1);
+        assert!(
+            lose_stderr.contains("already exists"),
+            "Expected 'already exists' in stderr, got: {lose_stderr}"
+        );
+
+        // Verify that exactly ONE machine exists in repository
+        let (ls_code, ls_stdout, _) = run_terminest(&["ls"], temp.path());
+        assert_eq!(ls_code, 0);
+        assert!(ls_stdout.contains("racing-vm"));
     }
 }
