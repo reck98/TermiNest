@@ -184,7 +184,7 @@ test prop_decoder_no_panic_on_fuzz_input ... ok
 test prop_crc32c_detects_single_bit_flip ... ok
 test prop_frame_detects_any_bit_flip ... ok
 
-=== terminest-transport (7 Unit Tests) ===
+=== terminest-transport (11 Unit Tests) ===
 test vsock::tests::test_vsock_address_display ... ok
 test vsock::tests::test_hyperv_port_guid_generation ... ok
 test in_memory::tests::test_in_memory_bidirectional_exchange ... ok
@@ -192,13 +192,17 @@ test in_memory::tests::test_in_memory_clean_close ... ok
 test in_memory::tests::test_send_after_close_returns_error ... ok
 test framed::tests::test_framed_duplex_stream_roundtrip ... ok
 test framed::tests::test_framed_fragmented_stream ... ok
+test framed::tests::test_framed_send_cancellation_marks_transport_closed ... ok
+test framed::tests::test_framed_write_error_marks_transport_closed ... ok
+test framed::tests::test_framed_task_abort_marks_transport_closed ... ok
+test framed::tests::test_framed_recv_incomplete_frame_marks_closed ... ok
 
 === transport_integration (3 Integration Tests) ===
 test test_in_memory_concurrent_ping_pong ... ok
 test test_framed_transport_large_video_frame ... ok
 test test_framed_transport_timeout ... ok
 
-Total: 40 Passed / 0 Failed (100% test pass rate)
+Total: 44 Passed / 0 Failed (100% test pass rate)
 ```
 
 ---
@@ -246,6 +250,77 @@ Known platform constraints documented for Milestone 1 & 2:
 
 - Protocol behavior matches its specification under ADR-0010.
 - Critical correctness and security defects (PR-01, PR-02, PR-03, SEC-01, SEC-02, TR-01, TR-02) have been completely corrected and verified.
-- All 40 automated tests, Clippy, and formatting checks pass with zero warnings.
+- All 44 automated tests, Clippy, and formatting checks pass with zero warnings.
 - Transport limitations are honestly documented without unsupported claims.
 - The repository is clean, disciplined, and prepared for Milestone 1.
+
+---
+
+## 13. Addendum: Final Cancellation-Safety & Transport Security Audit
+
+### 13.1. `FramedTransport` Cancellation-Safety Findings
+
+A comprehensive review of `FramedTransport::send()` was conducted to determine the failure and recovery semantics under asynchronous runtime conditions:
+
+1. **Future Cancellation During Async Write:**
+   - *Vulnerability:* In Tokio, `AsyncWriteExt::write_all()` performs multiple partial `poll_write()` passes in a loop across `.await` points. If the caller wraps `send()` in `tokio::select!` or `tokio::time::timeout` and the future is cancelled after a partial write (e.g. 32 bytes written out of 500), the future is dropped immediately.
+   - *Defect Identified:* Prior to this review, error handling in `send()` relied on `if let Err(e) = ... { self.is_closed = true; }`. However, future cancellation / drop does **not** invoke error branches. As a result, `self.is_closed` remained `false`.
+   - *Stream Desynchronization:* Any subsequent call to `send()` on the same transport proceeded to write the bytes of a *new* frame directly into the stream immediately behind the truncated 32-byte fragment of the cancelled frame. The remote stream decoder would receive garbled framing, fail checksum or magic validation, and desynchronize.
+2. **Task Abort During Active Write:**
+   - If a background worker holding a `FramedTransport` inside an `Arc<Mutex<_>>` is aborted via `JoinHandle::abort()`, the drop behavior mirrors cancellation: the future unwinds, bypassing match arms.
+3. **Timeout After Partial Write:**
+   - `tokio::time::timeout(dur, transport.send(frame))` dropping the future leaves the socket stream corrupted unless explicitly guarded against reuse.
+4. **Subsequent Send Attempt:**
+   - Without an RAII guard, a subsequent `send()` attempt is accepted, guaranteeing protocol framing corruption.
+
+### 13.2. Corrections Implemented
+
+To enforce a deterministic fail-closed architecture, the following engineering corrections were implemented in `crates/terminest-transport/src/framed.rs`:
+
+1. **RAII Fail-Closed Guard (`SendCancellationGuard`):**
+   ```rust
+   struct SendCancellationGuard<'a> {
+       is_closed: &'a mut bool,
+       committed: bool,
+   }
+   ```
+   - *Mechanism:* Upon construction at the beginning of `FramedTransport::send()`, `SendCancellationGuard` immediately mutates `*self.is_closed = true`.
+   - *Disarm on Success:* Only when both `write_all()` and `flush()` successfully complete without error or cancellation is `guard.commit()` invoked, which sets `committed = true` and restores `*self.is_closed = false`.
+   - *Fail-Closed Drop:* If dropped at any `.await` point due to timeout, cancellation, task abort, panic unwind, or I/O error, the guard drops with `committed == false`, leaving `is_closed == true`.
+   - *Permanent Closure:* Any subsequent call to `send()` immediately returns `Err(TransportError::Closed)` without writing a single byte to the underlying stream.
+2. **Fail-Closed Read Path (`recv`):**
+   - Updated `FramedTransport::recv()` to explicitly set `self.is_closed = true` on `io.read()` errors, decoder parsing errors, and trailing byte EOF mismatches.
+3. **Deterministic Failure Tests Added:**
+   - `test_framed_send_cancellation_marks_transport_closed`: Tests partial write timeout on a 32-byte `duplex` stream; proves `is_closed == true` and verifies subsequent send returns `Err(TransportError::Closed)`.
+   - `test_framed_write_error_marks_transport_closed`: Proves dropped peer marks transport closed and subsequent writes fail closed.
+   - `test_framed_task_abort_marks_transport_closed`: Spawns task writing on duplex buffer, aborts task handle midway, and proves Arc/Mutex-held transport is marked closed.
+   - `test_framed_recv_incomplete_frame_marks_closed`: Proves incomplete frame at EOF marks transport closed and subsequent `recv()` returns `None`.
+
+### 13.3. Hyper-V & Vsock Security Documentation Corrections
+
+All security claims in `protocol-v1.md`, `transport-spike.md`, and `M0-implementation.md` were audited and reconciled against official Microsoft Windows Hyper-V Sockets and Linux Vsock documentation:
+
+1. **Hypervisor Isolation:**
+   - *Clarification:* Grounded in hardware-assisted VM boundary isolation (VMBus / virtio shared memory rings). Confirmed it isolates guest address spaces from host address spaces, but does **not** provide cryptographic authentication or confidentiality.
+2. **Endpoint Registration & Access Control:**
+   - *Windows `AF_HYPERV`:* Documented the requirement for administrative registration under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices` per Microsoft Hyper-V Sockets specifications. Identified that unprivileged user-space orchestrators (`REQ-INST-01`) cannot dynamically register custom Service GUIDs.
+   - *Linux `AF_VSOCK`:* Documented that `/dev/vsock` access is controlled by filesystem DAC/MAC, with ports `< 1024` requiring `CAP_NET_BIND_SERVICE`.
+3. **Peer Identity vs. Process Identity:**
+   - *Correction:* Removed misleading phrasing conflating CID/GUID mapping with peer authenticity. Clarified that `sockaddr_vm.svm_cid` and `SOCKADDR_HV.VmId` identify the *virtual machine container instance*, not the user identity or process identity inside the VM.
+4. **Cryptographic Authentication & Encryption:**
+   - *Explicit Delineation:* Explicitly stated that raw Vsock, Hyper-V sockets, and Named Pipes provide **zero cryptographic authentication** (no public keys, certificates, or HMAC) and **zero wire encryption** (data traverses shared memory in plaintext). Cryptographic authentication and encryption are formally classified as **Deferred** to future network-facing transports.
+5. **CRC-32C Corruption Detection:**
+   - *Boundary:* Castagnoli CRC-32C is documented strictly as mathematical transmission integrity against accidental noise; it has no cryptographic tamper resistance.
+
+### 13.4. Final Test Suite Ledger & Toolchain Verification
+
+- `cargo fmt --all -- --check`: **CLEAN (0 formatting diffs)**
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: **CLEAN (0 warnings)**
+- `cargo test --workspace --all-features`: **44 PASSED / 0 FAILED**
+- `cargo test --workspace --doc`: **0 PASSED / 0 FAILED (All doc tests clean)**
+
+### 13.5. Remaining System Limitations
+
+1. **Physical / Real VM Vsock:** Host-to-guest Vsock connectivity remains *Designed & Mapped (Unverified on real VM)* until full guest provisioning is introduced in Milestone 2.
+2. **Windows Home QEMU Adapter:** Named Pipe bridge for QEMU on Windows Home remains *Designed but Not Implemented* until the host orchestrator is built in Milestone 1.
+3. **Hard Process Kill (SIGKILL / TerminateProcess):** In-process cancellation guards cannot intercept hard process termination by the operating system kernel. However, kernel termination automatically tears down socket file descriptors, resulting in standard EOF detection by the peer.

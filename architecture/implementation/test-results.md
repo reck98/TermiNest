@@ -11,14 +11,14 @@
 ## 1. Executive Summary
 
 Milestone 0 automated test suites executed cleanly across unit, property-based, and transport integration tests:
-- **Total Test Cases Executed:** 40 tests
-- **Passed:** 40 (100% test pass rate)
+- **Total Test Cases Executed:** 44 tests
+- **Passed:** 44 (100% test pass rate)
 - **Failed:** 0
 - **Ignored / Filtered:** 0
 - **Clippy Status:** 0 warnings (`cargo clippy --workspace --all-targets --all-features -- -D warnings`)
 - **Formatting Status:** Clean (`cargo fmt --all -- --check`)
 - **Documentation Tests:** 0 failures (`cargo test --workspace --doc`)
-- **Coverage Qualification:** 100% test pass rate across 40 defined test cases; line/branch coverage has not been instrumented with `cargo-llvm-cov`.
+- **Coverage Qualification:** 100% test pass rate across 44 defined test cases; line/branch coverage has not been instrumented with `cargo-llvm-cov`.
 
 ---
 
@@ -59,7 +59,7 @@ Milestone 0 automated test suites executed cleanly across unit, property-based, 
 - `prop_crc32c_detects_single_bit_flip`: Tested random bit inversions across variable payloads; proved Castagnoli CRC-32C detects all single-bit corruptions.
 - `prop_frame_detects_any_bit_flip`: Verified that ANY single-bit flip across the entire 16-byte header or payload is deterministically rejected.
 
-### 2.3. `terminest-transport` Unit Tests (7 Tests — 100% Pass)
+### 2.3. `terminest-transport` Unit Tests (11 Tests — 100% Pass)
 - `vsock::tests::test_vsock_address_display`: Verified URI format `vsock://<cid>:<port>`.
 - `vsock::tests::test_hyperv_port_guid_generation`: Tested port `10001` (`0x2711`) mapping to `{00002711-facb-11e6-bd58-64006a561569}`.
 - `in_memory::tests::test_in_memory_bidirectional_exchange`: Verified full-duplex message exchange between paired endpoints.
@@ -67,6 +67,10 @@ Milestone 0 automated test suites executed cleanly across unit, property-based, 
 - `in_memory::tests::test_send_after_close_returns_error`: Verified send on closed transport returns `TransportError::Closed`.
 - `framed::tests::test_framed_duplex_stream_roundtrip`: Verified `FramedTransport` framing over Tokio async duplex stream.
 - `framed::tests::test_framed_fragmented_stream`: Verified streaming fragmentation over async byte stream.
+- `framed::tests::test_framed_send_cancellation_marks_transport_closed`: Verified that dropping a `send()` future during partial write (via timeout) triggers `SendCancellationGuard`, permanently marking the transport closed and rejecting subsequent writes.
+- `framed::tests::test_framed_write_error_marks_transport_closed`: Verified that write IO errors permanently mark transport closed and subsequent writes fail closed.
+- `framed::tests::test_framed_task_abort_marks_transport_closed`: Verified that aborting a task during an active write marks the transport closed.
+- `framed::tests::test_framed_recv_incomplete_frame_marks_closed`: Verified that an incomplete frame at EOF marks transport closed and subsequent `recv()` returns `None`.
 
 ### 2.4. `terminest-transport` Integration Tests (3 Tests — 100% Pass)
 - `test_in_memory_concurrent_ping_pong`: 100 sequential bidirectional async RPC ping-pongs across concurrent Tokio tasks.

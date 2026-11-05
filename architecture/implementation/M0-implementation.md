@@ -85,7 +85,7 @@ All subsystem components are categorized using the explicit five-state taxonomy:
 | **JSON-RPC 2.0 Models & Notifications**| **Implemented & Tested** | Requests, responses (including null IDs), notifications, and computer-use types. |
 | **`Transport` Trait** | **Implemented & Tested** | Asynchronous bidirectional frame interface in `terminest-transport`. |
 | **`InMemoryTransport` Duplex Pair** | **Implemented & Tested** | In-memory channel test harness with clean EOF propagation. |
-| **`FramedTransport<IO>` Adapter** | **Implemented & Tested** | Framing adapter tested over Tokio async duplex byte streams. |
+| **`FramedTransport<IO>` Adapter** | **Implemented & Tested** | Framing adapter tested over Tokio async duplex byte streams with `SendCancellationGuard` fail-closed safety. |
 | **Hyper-V Socket (`AF_HYPERV`) Mapping**| **Designed & Mapped (Unverified on real VM)** | Winsock API mapped; live connection requires VM creation in M2. |
 | **QEMU Windows Named Pipe Adapter** | **Designed but Not Implemented** | Proposed fallback architecture for Windows Home; not yet coded. |
 | **Authenticated Framing (AEAD)** | **Deferred** | Out of scope for M0; deferred to network transports. |
@@ -109,9 +109,15 @@ All subsystem components are categorized using the explicit five-state taxonomy:
 
 ## 5. Security & Threat Hardening Review
 
-- **Integrity vs. Authentication Clarification:** Documented explicitly in `protocol-v1.md` that Castagnoli CRC-32C provides data integrity detection against transmission bit flips, not cryptographic peer authentication. Isolation relies on hardware hypervisor ring buffers.
-- **Denial of Service (DoS) Prevention:** Payloads are capped at 16 MB. The decoder rejects inputs that exceed buffer capacity with `BufferOverflow` and poisons the decoder.
-- **Stream Framing Integrity:** Full header-and-payload checksum coverage (ADR-0010) prevents stream desynchronization from corrupted `PayloadLength` fields and blocks channel misrouting.
+The implementation enforces explicit security boundaries grounded in primary platform specifications:
+- **Integrity vs. Cryptographic Authentication & Confidentiality:**
+  - Castagnoli CRC-32C provides mathematical error detection against accidental transmission bit flips, buffer drops, and framing misalignment. It is **not** a cryptographic signature and does not protect against an active in-path adversary.
+  - Hypervisor transport (`AF_HYPERV` / `AF_VSOCK`) provides hardware-assisted virtual machine boundary isolation (memory address space separation via VMBus / virtio shared memory rings). It does **not** provide cryptographic peer authentication or wire encryption.
+  - Vsock and Hyper-V socket addressing identifies the *virtual machine container instance* (via CID or VM GUID), not the user identity or process identity inside the VM.
+  - Cryptographic peer authentication (e.g., mTLS / HMAC tokens) and stream confidentiality (wire encryption) are deferred to future network-facing transports.
+- **Stream Framing Integrity & Cancellation Safety:** Full header-and-payload checksum coverage (ADR-0010) prevents stream desynchronization from corrupted `PayloadLength` fields. In `FramedTransport`, the `SendCancellationGuard` ensures that any interrupted write, timeout, or task abort permanently marks the transport closed, preventing subsequent writes from corrupting the stream with interleaved partial frames.
+- **Denial of Service (DoS) Prevention:** Payloads are capped at 16 MB. The decoder rejects inputs exceeding buffer capacity with `BufferOverflow` and poisons the decoder.
+- **Endpoint Registration & Access Control:** Hyper-V sockets require custom Service GUID registration under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices`, protected by Windows registry ACLs (requiring Administrator privileges). Linux `/dev/vsock` is governed by filesystem permissions and `CAP_NET_BIND_SERVICE` for ports `< 1024`.
 - **Zero Unsafe Rust:** Zero `unsafe` blocks exist across the entire M0 codebase.
 
 ---
@@ -128,9 +134,9 @@ All subsystem components are categorized using the explicit five-state taxonomy:
 | Property-Based Generative Tests | `terminest-protocol::tests::protocol_fuzz` | 4 | **PASS (100%)** |
 | Vsock Addressing & GUIDs | `terminest-transport::vsock` | 2 | **PASS (100%)** |
 | In-Memory Transport | `terminest-transport::in_memory` | 3 | **PASS (100%)** |
-| Stream Framing Adapter | `terminest-transport::framed` | 2 | **PASS (100%)** |
+| Stream Framing Adapter & Cancellation Safety | `terminest-transport::framed` | 6 | **PASS (100%)** |
 | Transport Integration & Timeouts | `terminest-transport::tests::transport_integration` | 3 | **PASS (100%)** |
-| **Total Automated Tests** | | **40** | **40 PASSED / 0 FAILED** |
+| **Total Automated Tests** | | **44** | **44 PASSED / 0 FAILED** |
 
 ---
 

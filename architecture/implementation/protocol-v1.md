@@ -59,7 +59,11 @@ Every frame transmitted across the transport begins with an immutable, fixed-siz
 - **Coverage (ADR-0010):** Covers the 12-byte header prefix (`Magic`, `Version`, `Flags`, `ChannelId`, `PayloadLength`) and the entire payload. This protects the frame against header corruption, channel misrouting, and stream desynchronization.
 
 > [!IMPORTANT]
-> **Integrity vs. Authentication:** CRC-32C provides data integrity detection against accidental transmission bit flips and buffer drops. It is **not** a cryptographic signature and does not protect against an active in-path adversary. Peer authenticity and isolation rely on hardware hypervisor boundary isolation (`AF_VSOCK` / `AF_HYPERV` kernel ring buffers) or OS access controls.
+> **Integrity vs. Authentication & Confidentiality:**
+> - **Accidental Corruption Detection:** Castagnoli CRC-32C provides mathematical integrity detection against accidental transmission bit flips, buffer drops, and framing misalignment. It is **not** a cryptographic hash or digital signature and provides zero security against an active in-path adversary.
+> - **Transport Boundary Isolation:** Hardware hypervisor boundary isolation (`AF_VSOCK` / `AF_HYPERV` kernel memory rings) separates guest memory from host memory, but does **not** provide cryptographic authentication or encryption.
+> - **No Inherent Cryptographic Authentication:** Raw Vsock and Hyper-V sockets identify VM containers (via CID / VmId GUID), not the user or process identity inside the VM.
+> - **No Wire Encryption:** Payloads travel as unencrypted plaintext through hypervisor shared memory. Cryptographic peer authentication and wire confidentiality (e.g. TLS or AEAD) are deferred to future network-facing transports.
 
 ---
 
@@ -123,4 +127,5 @@ Lightweight metrics emitted periodically by the guest daemon:
 3. **Handshake Verification:** Host validates `version == "1.0.0"` and returns `HandshakeResult`.
 4. **Heartbeats:** Either party emits Heartbeat frames (`Flags = 0x04`, `PayloadLen = 0`) periodically.
 5. **Framing Errors & Decoder Poisoning:** Any framing violation (invalid magic, version, flags, or payload exceeding buffer capacity) marks the incremental decoder as poisoned (`ProtocolError::StreamPoisoned`), enforcing fail-closed connection reset rather than risky speculative re-synchronization.
-6. **Clean Termination:** Graceful close via `Transport::close()` drops the transmitter, notifying the remote receiver with EOF (`None`).
+6. **Cancellation Safety & Fail-Closed Write:** In `FramedTransport`, any interrupted, cancelled, or timed-out `send()` operation immediately trips the fail-closed `SendCancellationGuard`, permanently marking the transport as closed (`is_closed = true`). This prevents subsequent writes from interleaving with an uncompleted, partially transmitted frame and corrupting the stream framing.
+7. **Clean Termination:** Graceful close via `Transport::close()` drops the transmitter, notifying the remote receiver with EOF (`None`).

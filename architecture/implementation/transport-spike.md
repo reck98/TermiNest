@@ -71,18 +71,37 @@ On Windows Home, Hyper-V management is absent, requiring QEMU with Windows Hyper
 
 ---
 
-## 5. Security Property Distinction
+## 5. Security Property Distinction & Platform Evaluation
 
-The implementation enforces the following distinct security boundaries:
+To prevent architectural ambiguity, the security properties of the TermiNest transport layer are explicitly evaluated across six distinct dimensions:
 
-| Security Property | Mechanism in M0 | Status |
+| Security Property | Platform Mechanism & Verification Status | Scope & Guarantees in M0 |
 |---|---|---|
-| **Accidental Corruption Detection** | Castagnoli CRC-32C over header prefix (0..12) and payload (ADR-0010) | **Implemented & Tested** |
-| **Stream Framing Integrity** | `StreamDecoder` poisoning on malformed headers, bounds checking | **Implemented & Tested** |
-| **DoS Memory Protection** | 16 MB maximum payload limit, 32 MB decoder capacity cap | **Implemented & Tested** |
-| **Transport Isolation** | Hardware hypervisor memory rings (`AF_VSOCK` / `AF_HYPERV`) | **Architecture Dependency (M2)** |
-| **Peer Authentication** | Cryptographic identity verification (mutual TLS / HMAC tokens) | **Deferred to Network Transports** |
-| **Confidentiality / Encryption** | In-transit stream encryption (TLS / WireGuard) | **Deferred to Network Transports** |
+| **Accidental Corruption Detection** | Castagnoli CRC-32C over header prefix (0..12) and payload (ADR-0010). **Implemented & Tested.** | Mathematical detection against transmission bit flips, buffer drops, and framing offset misalignment. Has zero cryptographic security against intentional tampering. |
+| **Stream Framing Integrity & Cancellation Safety** | `StreamDecoder` poisoning on malformed headers, bounded buffers, and `SendCancellationGuard` fail-closed write safety. **Implemented & Tested.** | Guarantees that framing errors or cancelled/timed-out writes permanently mark the transport as closed, preventing partial-frame interleaving and stream desynchronization. |
+| **Transport Boundary Isolation** | Hardware hypervisor memory rings (`AF_VSOCK` / `AF_HYPERV` VMBus channels). **Architecture Dependency (M2).** | Isolates guest virtual address spaces from host kernel and other guest VMs. Prevents external processes outside the VM/host boundary from snooping on the VMBus memory channel. |
+| **Endpoint Registration & Access Control** | Windows Registry Service GUID ACLs (`HKLM\...\GuestCommunicationServices`) and Linux `/dev/vsock` filesystem DAC/MAC. **Designed & Mapped.** | Controls which OS principals can register and bind communication endpoints. On Windows, writing to `HKLM` requires Administrator privileges; on Linux, ports `< 1024` require `CAP_NET_BIND_SERVICE`. |
+| **Peer Identity Verification** | VM Context ID (`sockaddr_vm.svm_cid`) or Hyper-V VM GUID (`SOCKADDR_HV.VmId`). **Designed & Mapped.** | Identifies the *virtual machine instance* or host kernel. **Does NOT identify the user or process** inside the VM; any process with access to the socket inside the guest can write to it. |
+| **Cryptographic Authentication** | Public-key signatures, HMAC tokens, mutual TLS (mTLS). **Deferred.** | Not provided by raw Vsock, Hyper-V sockets, or Named Pipes. Deferred to future network-facing transports. |
+| **Confidentiality / Encryption** | In-transit stream encryption (TLS / WireGuard / AEAD). **Deferred.** | Not provided by raw Vsock or Hyper-V sockets. Payloads travel as plaintext through hypervisor shared memory. |
+
+### 5.1. Primary Source Platform Grounding
+
+1. **Microsoft Hyper-V Sockets (`AF_HYPERV`):**
+   - *Platform Specification:* Winsock address family `AF_HYPERV` (socket family 34). Addressing via `SOCKADDR_HV` struct with `VmId` GUID and `ServiceId` GUID.
+   - *Registry Requirement:* MSDN documentation ("Hyper-V Sockets - Architecture and Configuration") mandates that custom service GUIDs be registered in `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\<Service-GUID>`.
+   - *Access Control:* Access permissions are governed by Windows Security Descriptors (ACLs) applied to the service registry key. Non-administrator processes cannot register custom service GUIDs without prior administrative setup.
+   - *Security Boundaries:* Hyper-V provides hardware-assisted virtual machine isolation. It does **not** provide cryptographic authentication of caller processes, nor does it encrypt VMBus shared memory rings.
+
+2. **Linux Virtual Sockets (`AF_VSOCK` / `hv_sock`):**
+   - *Platform Specification:* POSIX socket family `AF_VSOCK` (socket family 40), defined in `<linux/vm_sockets.h>` and `vsock(7)`. Addressing via `struct sockaddr_vm` with Context ID (CID) and 32-bit port.
+   - *Access Control:* Access to the transport is governed by permissions on `/dev/vsock`. Ports below `1024` require `CAP_NET_BIND_SERVICE`. Unprivileged ports (`1024..65535`) may be bound by any user process with read/write access to `/dev/vsock`.
+   - *Peer Identity:* The CID identifies the VM endpoint (e.g. `VMADDR_CID_HOST = 2`), but provides no cryptographic verification of which user or process opened the socket inside that VM.
+
+3. **Windows Named Pipes (`\\.\pipe\...`):**
+   - *Platform Specification:* Win32 Named Pipe API (`CreateNamedPipeW`, `ConnectNamedPipe`).
+   - *Access Control:* Governed by Windows Discretionary Access Control Lists (DACLs) in the `SECURITY_ATTRIBUTES` struct. Allows restricting access strictly to the current user's SID or `LocalSystem`.
+   - *Security Boundaries:* Named pipes provide inter-process communication within the local host security boundary; they do not cross hypervisor boundaries unless bridged by an emulator such as QEMU.
 
 ---
 
