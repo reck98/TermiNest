@@ -4,6 +4,8 @@ This directory contains implementation artifacts, specifications, platform feasi
 
 ## Document Index
 
+- **[Milestone 1 Final Remediation Report (M1-final-remediation-report.md)](M1-final-remediation-report.md):** Detailed report documenting the remediation of AUDIT-M1-02, RACE-M1-01, AUDIT-M1-03, IDEM-M1-01, and CONC-M1-02, including persistent audit storage, external locks, two-phase audit protocol, and idempotent recovery.
+- **[Milestone 1 Second Independent Re-verification Audit (M1-reverification-audit.md)](M1-reverification-audit.md):** Formal second independent audit report analyzing deletion races, audit log erasure, and outstanding findings.
 - **[Milestone 1 Implementation Report (M1-implementation.md)](M1-implementation.md):** Complete implementation report for the core host orchestrator and CLI foundation, including domain model, lifecycle state machine, hypervisor SPI, mock backend, atomic persistence, and CLI command suite.
 - **[Milestone 1 Independent Verification Audit (M1-verification-audit.md)](M1-verification-audit.md):** Formal audit report detailing defects found (`CONC-M1-01`, `AUDIT-M1-01`, `LIFE-M1-01`, `CLI-M1-01`, `CLI-M1-02`) and conditional acceptance decision.
 - **[Milestone 1 Correction Report (M1-correction-report.md)](M1-correction-report.md):** Comprehensive report detailing the resolution, implementation, and test verification of all M1 audit findings, preparing the workspace for re-audit.
