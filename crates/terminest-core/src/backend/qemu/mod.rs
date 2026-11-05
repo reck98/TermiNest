@@ -10,7 +10,8 @@ pub mod discovery;
 pub mod error;
 
 pub use capabilities::{
-    parse_accelerators, parse_version, QemuCapabilities, QemuVersion, QemuVersionPolicy,
+    parse_accelerators, parse_version, safe_truncate_str, AcceleratorHostStatus, QemuCapabilities,
+    QemuReleaseKind, QemuVersion, QemuVersionPolicy,
 };
 pub use config::{QemuAccelerator, QemuCpuConfig, QemuDisplay, QemuMachineType, QemuProcessConfig};
 pub use discovery::{is_executable, QemuDiscovery};

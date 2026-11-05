@@ -86,18 +86,75 @@ impl CommandRunner for ProcessCommandRunner {
     }
 }
 
-/// Executes a child process directly (without a shell) with bounded execution time and memory.
+/// Result of draining a pipe stream with independent memory retention bounds.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct DrainResult {
+    /// In-memory retained buffer, bounded to `max_bytes`.
+    pub retained: Vec<u8>,
+    /// Total number of bytes drained from the pipe before reaching EOF.
+    pub total_bytes: usize,
+    /// Whether the output exceeded `max_bytes` and was truncated in retention.
+    pub truncated: bool,
+}
+
+/// Continuously drains a pipe stream to EOF in chunks, retaining at most `max_bytes`.
+///
+/// Excess bytes beyond `max_bytes` are safely discarded from memory while continuing
+/// to drain the pipe, preventing the child process from blocking on a full OS pipe buffer.
+fn drain_stream<R: std::io::Read>(mut reader: R, max_bytes: usize) -> std::io::Result<DrainResult> {
+    let mut retained = Vec::new();
+    let mut total_bytes = 0;
+    let mut buf = [0u8; 8192];
+
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total_bytes += n;
+        if retained.len() < max_bytes {
+            let space = max_bytes - retained.len();
+            let to_copy = std::cmp::min(space, n);
+            retained.extend_from_slice(&buf[..to_copy]);
+        }
+    }
+
+    let truncated = total_bytes > max_bytes;
+    Ok(DrainResult {
+        retained,
+        total_bytes,
+        truncated,
+    })
+}
+
+/// Executes a child process directly (without a shell) with concurrent stream draining,
+/// bounded execution time, and independent memory retention bounds.
 fn run_process_bounded(
     program: &Path,
     args: &[&str],
     timeout: Duration,
     max_bytes: usize,
 ) -> Result<String, QemuError> {
-    use std::io::Read;
+    run_process_bounded_with_env(program, args, &[], timeout, max_bytes)
+}
+
+/// Executes a child process directly with optional environment variables, concurrent pipe draining,
+/// bounded execution time, and process reaping on timeout.
+pub fn run_process_bounded_with_env(
+    program: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout: Duration,
+    max_bytes: usize,
+) -> Result<String, QemuError> {
     use std::process::{Command, Stdio};
 
     let mut cmd = Command::new(program);
     cmd.args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -117,67 +174,112 @@ fn run_process_bounded(
         }
     })?;
 
-    let mut stdout = child.stdout.take().ok_or_else(|| {
+    let stdout_pipe = child.stdout.take().ok_or_else(|| {
         QemuError::System("Failed to capture stdout pipe from child process".into())
     })?;
-    let mut stderr = child.stderr.take().ok_or_else(|| {
+    let stderr_pipe = child.stderr.take().ok_or_else(|| {
         QemuError::System("Failed to capture stderr pipe from child process".into())
     })?;
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    let reader_handle = std::thread::spawn(move || {
-        let mut out_buf = Vec::new();
-        let mut err_buf = Vec::new();
-        let out_res = (&mut stdout)
-            .take(max_bytes as u64)
-            .read_to_end(&mut out_buf);
-        let err_res = (&mut stderr)
-            .take(max_bytes as u64)
-            .read_to_end(&mut err_buf);
-        let _ = tx.send((out_res, out_buf, err_res, err_buf));
+    // Spawn TWO concurrent reader threads to drain stdout and stderr simultaneously,
+    // completely eliminating pipe buffer deadlocks.
+    let (tx_out, rx_out) = std::sync::mpsc::channel();
+    let stdout_handle = std::thread::spawn(move || {
+        let res = drain_stream(stdout_pipe, max_bytes);
+        let _ = tx_out.send(res);
     });
 
-    match rx.recv_timeout(timeout) {
-        Ok((out_res, out_buf, _err_res, err_buf)) => {
-            let _ = reader_handle.join();
+    let (tx_err, rx_err) = std::sync::mpsc::channel();
+    let stderr_handle = std::thread::spawn(move || {
+        let res = drain_stream(stderr_pipe, max_bytes);
+        let _ = tx_err.send(res);
+    });
+
+    let start_time = std::time::Instant::now();
+
+    // Await completion of both streams within overall timeout
+    let out_outcome = rx_out.recv_timeout(timeout);
+    let remaining_timeout = timeout.saturating_sub(start_time.elapsed());
+    let err_outcome = if out_outcome.is_ok() {
+        rx_err.recv_timeout(remaining_timeout)
+    } else {
+        rx_err
+            .try_recv()
+            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Timeout)
+    };
+
+    match (out_outcome, err_outcome) {
+        (Ok(out_res), Ok(err_res)) => {
+            // Both streams completed naturally within timeout!
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
 
             let status = child
                 .wait()
                 .map_err(|e| QemuError::System(format!("Failed to wait for process exit: {e}")))?;
 
+            let out_drain = out_res
+                .map_err(|e| QemuError::System(format!("Failed reading child stdout: {e}")))?;
+            let err_drain = err_res
+                .map_err(|e| QemuError::System(format!("Failed reading child stderr: {e}")))?;
+
             if !status.success() {
-                let stderr_tail = String::from_utf8_lossy(&err_buf).trim().to_string();
+                let stderr_tail = String::from_utf8_lossy(&err_drain.retained)
+                    .trim()
+                    .to_string();
                 return Err(QemuError::ProcessUnexpectedExit {
                     exit_status: status.code(),
                     stderr_tail,
                 });
             }
 
-            out_res.map_err(|e| QemuError::System(format!("Failed reading stdout: {e}")))?;
-            let stdout_str = String::from_utf8(out_buf).map_err(|e| {
+            let stdout_str = String::from_utf8(out_drain.retained).map_err(|e| {
                 QemuError::VersionParseError(format!("Output contains invalid UTF-8: {e}"))
             })?;
 
             Ok(stdout_str)
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+        _ => {
+            // Execution timed out on at least one stream!
+            // 1. Forcefully terminate the direct child process
             let _ = child.kill();
+            // 2. Reap the direct child process table entry
             let _ = child.wait();
-            let _ = reader_handle.join();
+
+            // 3. Bounded cleanup for reader threads.
+            // When child.kill() runs, its pipe write handles are closed.
+            // If the direct child held the pipes, reader threads will reach EOF promptly.
+            // We give up to 200ms grace to join completed readers.
+            let drain_grace = Duration::from_millis(200);
+            let grace_start = std::time::Instant::now();
+            while grace_start.elapsed() < drain_grace {
+                if stdout_handle.is_finished() && stderr_handle.is_finished() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            if stdout_handle.is_finished() {
+                let _ = stdout_handle.join();
+            }
+            if stderr_handle.is_finished() {
+                let _ = stderr_handle.join();
+            }
+            // If either handle is NOT finished, an uncooperative descendant process is holding
+            // open the inherited pipe. We deliberately do NOT block indefinitely on unjoined handles.
+
             Err(QemuError::Timeout(timeout))
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader_handle.join();
-            Err(QemuError::System(
-                "Output reader thread disconnected prematurely".into(),
-            ))
         }
     }
 }
 
 /// Validates whether a path points to an existing executable file.
+///
+/// - On Windows (`cfg(windows)`): Requires a regular file with the `.exe` extension (case-insensitive).
+///   Scripts (`.cmd`, `.bat`), directories, and extension-less binaries are strictly rejected
+///   to conform with direct process execution without a shell.
+/// - On Unix (`cfg(unix)`): Requires a regular file with at least one executable permission bit set
+///   (`mode & 0o111 != 0`).
 pub fn is_executable(path: &Path) -> bool {
     if !path.is_file() {
         return false;
@@ -187,8 +289,6 @@ pub fn is_executable(path: &Path) -> bool {
     {
         if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
             ext.eq_ignore_ascii_case("exe")
-                || ext.eq_ignore_ascii_case("cmd")
-                || ext.eq_ignore_ascii_case("bat")
         } else {
             false
         }
@@ -391,6 +491,73 @@ mod tests {
             _max_bytes: usize,
         ) -> Result<String, QemuError> {
             (self.run_fn)(program, args)
+        }
+    }
+
+    #[test]
+    fn test_is_executable_validation_rules() {
+        let temp_dir = tempfile::tempdir().expect("create tempdir");
+
+        let exe_file = temp_dir.path().join("qemu.exe");
+        File::create(&exe_file).unwrap();
+
+        let cmd_file = temp_dir.path().join("qemu.cmd");
+        File::create(&cmd_file).unwrap();
+
+        let bat_file = temp_dir.path().join("qemu.bat");
+        File::create(&bat_file).unwrap();
+
+        let no_ext_file = temp_dir.path().join("qemu");
+        File::create(&no_ext_file).unwrap();
+
+        let non_existent = temp_dir.path().join("missing.exe");
+
+        #[cfg(windows)]
+        {
+            assert!(is_executable(&exe_file), ".exe must be accepted on Windows");
+            assert!(
+                !is_executable(&cmd_file),
+                ".cmd must be rejected on Windows (no shell)"
+            );
+            assert!(
+                !is_executable(&bat_file),
+                ".bat must be rejected on Windows (no shell)"
+            );
+            assert!(
+                !is_executable(&no_ext_file),
+                "extension-less file must be rejected on Windows"
+            );
+            assert!(
+                !is_executable(temp_dir.path()),
+                "directories must be rejected"
+            );
+            assert!(
+                !is_executable(&non_existent),
+                "missing files must be rejected"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(
+                !is_executable(&no_ext_file),
+                "file without +x must be rejected on Unix"
+            );
+
+            std::fs::set_permissions(&no_ext_file, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                is_executable(&no_ext_file),
+                "file with +x must be accepted on Unix"
+            );
+            assert!(
+                !is_executable(temp_dir.path()),
+                "directories must be rejected"
+            );
+            assert!(
+                !is_executable(&non_existent),
+                "missing files must be rejected"
+            );
         }
     }
 
