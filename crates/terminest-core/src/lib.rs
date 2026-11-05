@@ -6,6 +6,7 @@
 pub mod backend;
 pub mod domain;
 pub mod error;
+pub mod orchestrator;
 pub mod persistence;
 
 pub use backend::{
@@ -18,4 +19,7 @@ pub use domain::{
     NetworkSpec, NetworkTier, OsFamily, OsSpec, PortForwardRule, StorageSpec,
 };
 pub use error::{CoreError, HypervisorError, PersistenceError};
+pub use orchestrator::{
+    BackendRegistry, MachineStatusView, MachineSummaryView, Orchestrator,
+};
 pub use persistence::{FilesystemMachineRepository, MachineRecord, MachineRepository};

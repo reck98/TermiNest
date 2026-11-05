@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-use crate::domain::{LifecycleError, MachineId, MachineName};
+pub use crate::domain::LifecycleError;
+use crate::domain::{MachineId, MachineName};
 
 /// Comprehensive application and orchestration error types for TermiNest Core.
 #[derive(Debug, Error)]
