@@ -253,4 +253,130 @@ mod tests {
             .expect("status");
         assert_eq!(final_status.state, MachineState::Stopped);
     }
+
+    #[tokio::test]
+    async fn test_orchestrator_rejects_deleting_transitional_states_without_force() {
+        let (orch, _, _temp) = setup_orchestrator();
+
+        // 1. Test Stopped -> Deleting (allowed without force)
+        let cfg1 = sample_config("stop-del-test");
+        let name1 = cfg1.name.to_string();
+        orch.create_machine(cfg1).await.expect("created");
+        orch.start_machine(&name1).await.expect("started");
+        orch.stop_machine(&name1, Duration::from_secs(1), false)
+            .await
+            .expect("stopped");
+        orch.delete_machine(&name1, false)
+            .await
+            .expect("delete stopped machine succeeds");
+
+        // 2. Test Paused -> Deleting (rejected without force)
+        let cfg2 = sample_config("pause-del-test");
+        let name2 = cfg2.name.to_string();
+        orch.create_machine(cfg2).await.expect("created");
+        orch.start_machine(&name2).await.expect("started");
+        orch.pause_machine(&name2).await.expect("paused");
+
+        let err = orch.delete_machine(&name2, false).await.unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Lifecycle(LifecycleError::InvalidTransition { .. })
+        ));
+
+        // Paused with force = true must succeed
+        orch.delete_machine(&name2, true)
+            .await
+            .expect("force delete paused machine succeeds");
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_deletion_all_eligibility_states() {
+        let (orch, _, _temp) = setup_orchestrator();
+
+        // Created state -> deletable without force
+        let cfg = sample_config("created-del-test");
+        let name = cfg.name.to_string();
+        orch.create_machine(cfg).await.expect("created");
+        orch.delete_machine(&name, false)
+            .await
+            .expect("delete created succeeds");
+
+        // Running state -> rejected without force
+        let cfg = sample_config("running-del-test");
+        let name = cfg.name.to_string();
+        orch.create_machine(cfg).await.expect("created");
+        orch.start_machine(&name).await.expect("started");
+        let err = orch.delete_machine(&name, false).await.unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Lifecycle(LifecycleError::CannotDeleteWhileRunning)
+        ));
+        orch.delete_machine(&name, true)
+            .await
+            .expect("force delete succeeds");
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_audit_trail_recorded_across_lifecycle() {
+        let temp = tempdir().expect("tempdir");
+        let repo = Arc::new(FilesystemMachineRepository::new(temp.path()).expect("repo"));
+        let mock_backend = Arc::new(MockHypervisorBackend::new());
+
+        let mut registry = BackendRegistry::new();
+        registry.register(HypervisorType::Mock, mock_backend.clone());
+
+        let orch = Orchestrator::new(repo.clone(), Arc::new(registry));
+        let config = sample_config("audit-trail-test");
+        let id = config.id;
+        let name_str = config.name.to_string();
+
+        // 1. Create machine -> audit event 'create'
+        orch.create_machine(config).await.expect("created");
+
+        // 2. Start machine -> audit event 'start'
+        orch.start_machine(&name_str).await.expect("started");
+
+        // 3. Pause machine -> audit event 'pause'
+        orch.pause_machine(&name_str).await.expect("paused");
+
+        // 4. Resume machine -> audit event 'resume'
+        orch.resume_machine(&name_str).await.expect("resumed");
+
+        // 5. Stop machine -> audit event 'stop'
+        orch.stop_machine(&name_str, Duration::from_secs(1), false)
+            .await
+            .expect("stopped");
+
+        // Read audit records from disk before deletion
+        let records = repo.read_audit_events(&id).await.expect("read audit");
+        assert_eq!(records.len(), 5);
+        assert_eq!(
+            records[0].action,
+            terminest_core::domain::AuditAction::Create
+        );
+        assert_eq!(
+            records[1].action,
+            terminest_core::domain::AuditAction::Start
+        );
+        assert_eq!(
+            records[2].action,
+            terminest_core::domain::AuditAction::Pause
+        );
+        assert_eq!(
+            records[3].action,
+            terminest_core::domain::AuditAction::Resume
+        );
+        assert_eq!(records[4].action, terminest_core::domain::AuditAction::Stop);
+
+        for r in &records {
+            assert_eq!(r.schema_version, "1.0.0");
+            assert_eq!(r.result, terminest_core::domain::AuditResult::Success);
+            assert!(r.error_message.is_none());
+        }
+
+        // 6. Delete machine -> audit event 'delete' is appended before folder deletion
+        orch.delete_machine(&name_str, false)
+            .await
+            .expect("deleted");
+    }
 }

@@ -1,8 +1,10 @@
+pub mod audit;
 pub mod config;
 pub mod id;
 pub mod lifecycle;
 pub mod name;
 
+pub use audit::{AuditAction, AuditPhase, AuditRecord, AuditResult};
 pub use config::{
     Architecture, ConfigValidationError, DiskFormat, DisplaySpec, HardwareSpec, HypervisorSpec,
     HypervisorType, MachineConfig, NetworkSpec, NetworkTier, OsFamily, OsSpec, PortForwardRule,
