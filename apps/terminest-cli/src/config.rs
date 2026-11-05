@@ -27,6 +27,8 @@ pub struct TermiNestPaths {
     pub machines_dir: PathBuf,
     pub templates_dir: PathBuf,
     pub run_dir: PathBuf,
+    pub audit_dir: PathBuf,
+    pub locks_dir: PathBuf,
     pub config_file: PathBuf,
 }
 
@@ -48,6 +50,8 @@ impl TermiNestPaths {
         let machines_dir = base_dir.join("machines");
         let templates_dir = base_dir.join("templates");
         let run_dir = base_dir.join("run");
+        let audit_dir = base_dir.join("audit");
+        let locks_dir = base_dir.join("locks");
         let config_file = base_dir.join("config.json");
 
         Self {
@@ -55,6 +59,8 @@ impl TermiNestPaths {
             machines_dir,
             templates_dir,
             run_dir,
+            audit_dir,
+            locks_dir,
             config_file,
         }
     }
@@ -89,6 +95,9 @@ impl TermiNestPaths {
         fs::create_dir_all(&self.machines_dir)?;
         fs::create_dir_all(&self.templates_dir)?;
         fs::create_dir_all(&self.run_dir)?;
+        fs::create_dir_all(&self.audit_dir)?;
+        fs::create_dir_all(&self.locks_dir)?;
+        fs::create_dir_all(self.locks_dir.join("machines"))?;
 
         if !self.config_file.exists() {
             let default_cfg = GlobalConfig::default();

@@ -31,6 +31,16 @@ pub enum CoreError {
     #[error("Operation aborted: {0}")]
     OperationAborted(String),
 
+    #[error("Audit log error on machine '{machine}': {error}")]
+    AuditFailure { machine: String, error: String },
+
+    #[error("Operation '{operation}' succeeded on machine '{machine}', but recording audit completion failed: {error}")]
+    AuditPostMutationFailure {
+        operation: String,
+        machine: String,
+        error: String,
+    },
+
     #[error("File system I/O error: {0}")]
     Io(#[from] std::io::Error),
 

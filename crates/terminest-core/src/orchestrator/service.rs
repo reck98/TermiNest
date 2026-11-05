@@ -11,7 +11,7 @@ use crate::orchestrator::{BackendRegistry, MachineStatusView, MachineSummaryView
 use crate::persistence::{MachineRecord, MachineRepository};
 
 /// Central orchestration engine coordinating machine definitions, lifecycle transitions,
-/// persistence, backend operations, and state reconciliation.
+/// persistence, backend operations, durable audit logging, and state reconciliation.
 pub struct Orchestrator {
     repository: Arc<dyn MachineRepository>,
     backend_registry: Arc<BackendRegistry>,
@@ -91,6 +91,23 @@ impl Orchestrator {
         let record = MachineRecord::with_state(config.clone(), MachineState::Defined);
         self.repository.save(&record).await?;
 
+        // Pre-mutation Intent: Record requested audit event before backend execution (fail closed)
+        let intent_event = AuditRecord::requested(
+            config.id,
+            config.name.clone(),
+            AuditAction::Create,
+            Some(MachineState::Defined),
+            Some(MachineState::Created),
+            "orchestrator",
+        );
+        self.repository
+            .append_audit_event(&config.id, &intent_event)
+            .await
+            .map_err(|e| CoreError::AuditFailure {
+                machine: config.name.to_string(),
+                error: format!("Failed to record audit intent: {e}"),
+            })?;
+
         // Instantiate virtual machine on backend
         if let Err(err) = backend.create_machine(&config).await {
             // Record failed audit event before compensation rollback
@@ -103,10 +120,17 @@ impl Orchestrator {
                 "orchestrator",
                 err.to_string(),
             );
-            let _ = self
+            if let Err(e) = self
                 .repository
                 .append_audit_event(&config.id, &fail_event)
-                .await;
+                .await
+            {
+                tracing::error!(
+                    "Failed to record audit failure event for machine {}: {}",
+                    config.id,
+                    e
+                );
+            }
 
             // Compensation: rollback persisted definition if backend creation failed
             let _ = self.repository.delete(&config.id).await;
@@ -128,10 +152,22 @@ impl Orchestrator {
             Some(MachineState::Created),
             "orchestrator",
         );
-        let _ = self
+        if let Err(e) = self
             .repository
             .append_audit_event(&config.id, &success_event)
-            .await;
+            .await
+        {
+            tracing::error!(
+                "Failed to record audit completion event for machine {}: {}",
+                config.id,
+                e
+            );
+            return Err(CoreError::AuditPostMutationFailure {
+                operation: "create".into(),
+                machine: config.name.to_string(),
+                error: e.to_string(),
+            });
+        }
 
         Ok(updated)
     }
@@ -149,8 +185,12 @@ impl Orchestrator {
         let lock = self.acquire_machine_lock(&id).await;
         let _guard = lock.lock().await;
 
-        // Reload latest state from repository under lock to guarantee fresh data
-        let record = self.repository.get_by_id(&id).await?.unwrap_or(record);
+        // Reload latest state from repository under lock to guarantee fresh data; fail if deleted
+        let record = self
+            .repository
+            .get_by_id(&id)
+            .await?
+            .ok_or_else(|| CoreError::MachineNotFound(selector.to_string()))?;
 
         // Verify lifecycle rule
         record.state.transition_to(MachineState::Starting)?;
@@ -158,6 +198,23 @@ impl Orchestrator {
         let backend = self
             .backend_registry
             .get(record.config.hypervisor.backend)?;
+
+        // Pre-mutation Intent: Record requested audit event before backend execution (fail closed)
+        let intent_event = AuditRecord::requested(
+            id,
+            record.config.name.clone(),
+            AuditAction::Start,
+            Some(record.state),
+            Some(MachineState::Starting),
+            "orchestrator",
+        );
+        self.repository
+            .append_audit_event(&id, &intent_event)
+            .await
+            .map_err(|e| CoreError::AuditFailure {
+                machine: record.config.name.to_string(),
+                error: format!("Failed to record audit intent: {e}"),
+            })?;
 
         // Record transitioning to Starting
         self.repository
@@ -181,10 +238,22 @@ impl Orchestrator {
                     Some(MachineState::Running),
                     "orchestrator",
                 );
-                let _ = self
+                if let Err(e) = self
                     .repository
                     .append_audit_event(&id, &success_event)
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to record audit completion event for machine {}: {}",
+                        id,
+                        e
+                    );
+                    return Err(CoreError::AuditPostMutationFailure {
+                        operation: "start".into(),
+                        machine: updated.config.name.to_string(),
+                        error: e.to_string(),
+                    });
+                }
 
                 Ok(MachineStatusView {
                     id,
@@ -213,7 +282,13 @@ impl Orchestrator {
                     "orchestrator",
                     err.to_string(),
                 );
-                let _ = self.repository.append_audit_event(&id, &fail_event).await;
+                if let Err(e) = self.repository.append_audit_event(&id, &fail_event).await {
+                    tracing::error!(
+                        "Failed to record audit failure event for machine {}: {}",
+                        id,
+                        e
+                    );
+                }
 
                 Err(CoreError::Backend(err))
             }
@@ -238,7 +313,11 @@ impl Orchestrator {
         let lock = self.acquire_machine_lock(&id).await;
         let _guard = lock.lock().await;
 
-        let record = self.repository.get_by_id(&id).await?.unwrap_or(record);
+        let record = self
+            .repository
+            .get_by_id(&id)
+            .await?
+            .ok_or_else(|| CoreError::MachineNotFound(selector.to_string()))?;
 
         if !force {
             record.state.transition_to(MachineState::Stopping)?;
@@ -247,6 +326,23 @@ impl Orchestrator {
         let backend = self
             .backend_registry
             .get(record.config.hypervisor.backend)?;
+
+        // Pre-mutation Intent: Record requested audit event before backend execution (fail closed)
+        let intent_event = AuditRecord::requested(
+            id,
+            record.config.name.clone(),
+            AuditAction::Stop,
+            Some(record.state),
+            Some(MachineState::Stopping),
+            "orchestrator",
+        );
+        self.repository
+            .append_audit_event(&id, &intent_event)
+            .await
+            .map_err(|e| CoreError::AuditFailure {
+                machine: record.config.name.to_string(),
+                error: format!("Failed to record audit intent: {e}"),
+            })?;
 
         self.repository
             .update_state(&id, MachineState::Stopping)
@@ -267,10 +363,22 @@ impl Orchestrator {
                     Some(MachineState::Stopped),
                     "orchestrator",
                 );
-                let _ = self
+                if let Err(e) = self
                     .repository
                     .append_audit_event(&id, &success_event)
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to record audit completion event for machine {}: {}",
+                        id,
+                        e
+                    );
+                    return Err(CoreError::AuditPostMutationFailure {
+                        operation: "stop".into(),
+                        machine: updated.config.name.to_string(),
+                        error: e.to_string(),
+                    });
+                }
 
                 Ok(MachineStatusView {
                     id,
@@ -299,7 +407,13 @@ impl Orchestrator {
                     "orchestrator",
                     err.to_string(),
                 );
-                let _ = self.repository.append_audit_event(&id, &fail_event).await;
+                if let Err(e) = self.repository.append_audit_event(&id, &fail_event).await {
+                    tracing::error!(
+                        "Failed to record audit failure event for machine {}: {}",
+                        id,
+                        e
+                    );
+                }
 
                 Err(CoreError::Backend(err))
             }
@@ -319,13 +433,34 @@ impl Orchestrator {
         let lock = self.acquire_machine_lock(&id).await;
         let _guard = lock.lock().await;
 
-        let record = self.repository.get_by_id(&id).await?.unwrap_or(record);
+        let record = self
+            .repository
+            .get_by_id(&id)
+            .await?
+            .ok_or_else(|| CoreError::MachineNotFound(selector.to_string()))?;
 
         record.state.transition_to(MachineState::Pausing)?;
 
         let backend = self
             .backend_registry
             .get(record.config.hypervisor.backend)?;
+
+        // Pre-mutation Intent: Record requested audit event before backend execution (fail closed)
+        let intent_event = AuditRecord::requested(
+            id,
+            record.config.name.clone(),
+            AuditAction::Pause,
+            Some(record.state),
+            Some(MachineState::Paused),
+            "orchestrator",
+        );
+        self.repository
+            .append_audit_event(&id, &intent_event)
+            .await
+            .map_err(|e| CoreError::AuditFailure {
+                machine: record.config.name.to_string(),
+                error: format!("Failed to record audit intent: {e}"),
+            })?;
 
         match backend.pause_machine(&id).await {
             Ok(()) => {
@@ -342,10 +477,22 @@ impl Orchestrator {
                     Some(MachineState::Paused),
                     "orchestrator",
                 );
-                let _ = self
+                if let Err(e) = self
                     .repository
                     .append_audit_event(&id, &success_event)
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to record audit completion event for machine {}: {}",
+                        id,
+                        e
+                    );
+                    return Err(CoreError::AuditPostMutationFailure {
+                        operation: "pause".into(),
+                        machine: updated.config.name.to_string(),
+                        error: e.to_string(),
+                    });
+                }
 
                 Ok(MachineStatusView {
                     id,
@@ -369,7 +516,13 @@ impl Orchestrator {
                     "orchestrator",
                     err.to_string(),
                 );
-                let _ = self.repository.append_audit_event(&id, &fail_event).await;
+                if let Err(e) = self.repository.append_audit_event(&id, &fail_event).await {
+                    tracing::error!(
+                        "Failed to record audit failure event for machine {}: {}",
+                        id,
+                        e
+                    );
+                }
 
                 Err(CoreError::Backend(err))
             }
@@ -389,13 +542,34 @@ impl Orchestrator {
         let lock = self.acquire_machine_lock(&id).await;
         let _guard = lock.lock().await;
 
-        let record = self.repository.get_by_id(&id).await?.unwrap_or(record);
+        let record = self
+            .repository
+            .get_by_id(&id)
+            .await?
+            .ok_or_else(|| CoreError::MachineNotFound(selector.to_string()))?;
 
         record.state.transition_to(MachineState::Resuming)?;
 
         let backend = self
             .backend_registry
             .get(record.config.hypervisor.backend)?;
+
+        // Pre-mutation Intent: Record requested audit event before backend execution (fail closed)
+        let intent_event = AuditRecord::requested(
+            id,
+            record.config.name.clone(),
+            AuditAction::Resume,
+            Some(record.state),
+            Some(MachineState::Running),
+            "orchestrator",
+        );
+        self.repository
+            .append_audit_event(&id, &intent_event)
+            .await
+            .map_err(|e| CoreError::AuditFailure {
+                machine: record.config.name.to_string(),
+                error: format!("Failed to record audit intent: {e}"),
+            })?;
 
         match backend.resume_machine(&id).await {
             Ok(()) => {
@@ -412,10 +586,22 @@ impl Orchestrator {
                     Some(MachineState::Running),
                     "orchestrator",
                 );
-                let _ = self
+                if let Err(e) = self
                     .repository
                     .append_audit_event(&id, &success_event)
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to record audit completion event for machine {}: {}",
+                        id,
+                        e
+                    );
+                    return Err(CoreError::AuditPostMutationFailure {
+                        operation: "resume".into(),
+                        machine: updated.config.name.to_string(),
+                        error: e.to_string(),
+                    });
+                }
 
                 let status = backend.get_machine_status(&id).await.unwrap_or(
                     crate::backend::BackendMachineStatus {
@@ -449,14 +635,21 @@ impl Orchestrator {
                     "orchestrator",
                     err.to_string(),
                 );
-                let _ = self.repository.append_audit_event(&id, &fail_event).await;
+                if let Err(e) = self.repository.append_audit_event(&id, &fail_event).await {
+                    tracing::error!(
+                        "Failed to record audit failure event for machine {}: {}",
+                        id,
+                        e
+                    );
+                }
 
                 Err(CoreError::Backend(err))
             }
         }
     }
 
-    /// Safely deletes a virtual machine, enforcing lifecycle invariants and force semantics.
+    /// Safely deletes a virtual machine, enforcing lifecycle invariants, persistent audit durability,
+    /// external per-machine locking, and idempotent backend recovery.
     pub async fn delete_machine(&self, selector: &str, force: bool) -> Result<(), CoreError> {
         // Level 1: Acquire repository inventory lock
         let _repo_lock = self
@@ -467,15 +660,19 @@ impl Orchestrator {
         let record = self.resolve_machine(selector).await?;
         let id = record.config.id;
 
-        // Level 2: Acquire per-machine lock
-        let machine_file_lock = self
+        // Level 2: Acquire per-machine lock on external lock path
+        let _machine_file_lock = self
             .repository
             .acquire_machine_lock(&id, Duration::from_secs(5))
             .await?;
         let lock = self.acquire_machine_lock(&id).await;
         let _guard = lock.lock().await;
 
-        let record = self.repository.get_by_id(&id).await?.unwrap_or(record);
+        let record = self
+            .repository
+            .get_by_id(&id)
+            .await?
+            .ok_or_else(|| CoreError::MachineNotFound(selector.to_string()))?;
 
         // Strict lifecycle invariant enforcement
         if !force {
@@ -493,17 +690,43 @@ impl Orchestrator {
             }
         }
 
+        // Pre-mutation Intent: Record requested delete event (fail closed)
+        let intent_event = AuditRecord::requested(
+            id,
+            record.config.name.clone(),
+            AuditAction::Delete,
+            Some(record.state),
+            Some(MachineState::Deleting),
+            "orchestrator",
+        );
+        self.repository
+            .append_audit_event(&id, &intent_event)
+            .await
+            .map_err(|e| CoreError::AuditFailure {
+                machine: record.config.name.to_string(),
+                error: format!("Failed to record audit intent: {e}"),
+            })?;
+
         let _ = self
             .repository
             .update_state(&id, MachineState::Deleting)
             .await;
 
-        // Delete from backend
+        // Delete from backend with idempotent handling (treating MachineNotFound as already removed)
         if let Ok(backend) = self.backend_registry.get(record.config.hypervisor.backend) {
-            backend.delete_machine(&id).await?;
+            match backend.delete_machine(&id).await {
+                Ok(()) => {}
+                Err(HypervisorError::MachineNotFound(_)) => {
+                    tracing::info!(
+                        "Machine '{}' was already removed from hypervisor backend; proceeding with repository deletion",
+                        id
+                    );
+                }
+                Err(e) => return Err(CoreError::Backend(e)),
+            }
         }
 
-        // Record deletion audit event before removing directory
+        // Record deletion completion audit event (persisted in dedicated audit directory)
         let delete_event = AuditRecord::completed(
             id,
             record.config.name.clone(),
@@ -512,24 +735,31 @@ impl Orchestrator {
             Some(MachineState::Deleting),
             "orchestrator",
         );
-        let _ = self.repository.append_audit_event(&id, &delete_event).await;
+        if let Err(e) = self.repository.append_audit_event(&id, &delete_event).await {
+            tracing::error!(
+                "Failed to record audit completion event for machine {}: {}",
+                id,
+                e
+            );
+        }
 
-        // Drop the machine file lock handle so the file handle closes before directory deletion on Windows
-        drop(machine_file_lock);
-
-        // Delete from repository
+        // Delete machine directory from repository.
+        // NOTE: The external per-machine lock (_machine_file_lock) remains held across this operation
+        // and is NOT dropped early, preventing any concurrent race interleaving.
         self.repository.delete(&id).await?;
+
         Ok(())
     }
 
-    /// Queries the live runtime status of a virtual machine, reconciling persistent state with the hypervisor backend.
+    /// Queries the live runtime status of a virtual machine, reconciling persistent state with the hypervisor backend
+    /// under exclusive per-machine locking whenever state mutation is required.
     pub async fn get_machine_status(&self, selector: &str) -> Result<MachineStatusView, CoreError> {
         let record = self.resolve_machine(selector).await?;
         let id = record.config.id;
 
         let backend = self.backend_registry.get(record.config.hypervisor.backend);
 
-        let (reconciled_state, pid, uptime_secs, memory_rss_bytes) = match backend {
+        let (mut reconciled_state, pid, uptime_secs, memory_rss_bytes) = match backend {
             Ok(b) => match b.get_machine_status(&id).await {
                 Ok(status) => {
                     let state = if record.state == MachineState::Failed
@@ -540,19 +770,6 @@ impl Orchestrator {
                     } else {
                         status.state
                     };
-
-                    if state != record.state {
-                        let _ = self.repository.update_state(&id, state).await;
-                        let rec_event = AuditRecord::completed(
-                            id,
-                            record.config.name.clone(),
-                            AuditAction::Reconcile,
-                            Some(record.state),
-                            Some(state),
-                            "orchestrator",
-                        );
-                        let _ = self.repository.append_audit_event(&id, &rec_event).await;
-                    }
                     (
                         state,
                         status.pid,
@@ -566,18 +783,6 @@ impl Orchestrator {
                     } else {
                         record.state
                     };
-                    if state != record.state {
-                        let _ = self.repository.update_state(&id, state).await;
-                        let rec_event = AuditRecord::completed(
-                            id,
-                            record.config.name.clone(),
-                            AuditAction::Reconcile,
-                            Some(record.state),
-                            Some(state),
-                            "orchestrator",
-                        );
-                        let _ = self.repository.append_audit_event(&id, &rec_event).await;
-                    }
                     (state, None, 0, 0)
                 }
                 Err(HypervisorError::Unavailable(_)) => (MachineState::Unknown, None, 0, 0),
@@ -585,6 +790,54 @@ impl Orchestrator {
             },
             Err(_) => (MachineState::Unknown, None, 0, 0),
         };
+
+        // If a state discrepancy is detected, acquire per-machine lock and reconcile persistent state
+        if reconciled_state != record.state {
+            let _machine_file_lock = self
+                .repository
+                .acquire_machine_lock(&id, Duration::from_secs(5))
+                .await?;
+            let lock = self.acquire_machine_lock(&id).await;
+            let _guard = lock.lock().await;
+
+            let current = self
+                .repository
+                .get_by_id(&id)
+                .await?
+                .ok_or_else(|| CoreError::MachineNotFound(selector.to_string()))?;
+
+            // Avoid overwriting active transitional states (Starting, Pausing, Resuming, Stopping, Deleting)
+            let is_transitional = matches!(
+                current.state,
+                MachineState::Starting
+                    | MachineState::Pausing
+                    | MachineState::Resuming
+                    | MachineState::Stopping
+                    | MachineState::Deleting
+            );
+
+            if !is_transitional && reconciled_state != current.state {
+                let _ = self.repository.update_state(&id, reconciled_state).await;
+                let rec_event = AuditRecord::completed(
+                    id,
+                    current.config.name.clone(),
+                    AuditAction::Reconcile,
+                    Some(current.state),
+                    Some(reconciled_state),
+                    "orchestrator",
+                );
+                if let Err(e) = self.repository.append_audit_event(&id, &rec_event).await {
+                    tracing::error!(
+                        "Failed to record audit reconciliation event for machine {}: {}",
+                        id,
+                        e
+                    );
+                }
+            } else if is_transitional {
+                // If transitional, preserve recorded transitional state
+                reconciled_state = current.state;
+            }
+        }
 
         Ok(MachineStatusView {
             id,

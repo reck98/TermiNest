@@ -166,4 +166,48 @@ mod tests {
         assert_eq!(loaded.config.name.as_str(), "retained-vm");
         assert_eq!(loaded.state, MachineState::Created);
     }
+
+    #[tokio::test]
+    async fn test_persistence_legacy_audit_migration() {
+        let temp = tempdir().expect("tempdir");
+        let legacy_id = MachineId::new();
+        let legacy_machine_dir = temp.path().join("machines").join(legacy_id.to_string());
+        fs::create_dir_all(&legacy_machine_dir).expect("create legacy machine dir");
+
+        // Write a legacy audit.jsonl inside the machine dir
+        let legacy_audit_file = legacy_machine_dir.join("audit.jsonl");
+        let sample_event = r#"{"schema_version":"1.0.0","event_id":"00000000-0000-0000-0000-000000000001","timestamp":"2026-11-05T12:00:00Z","machine_id":""#.to_string()
+            + &legacy_id.to_string()
+            + r#"","machine_name":"legacy-vm","action":"create","phase":"completed","actor":"test","result":"success"}"#
+            + "\n";
+        fs::write(&legacy_audit_file, sample_event.as_bytes()).expect("write legacy audit");
+
+        // Initialize repository: must automatically discover and migrate legacy audit log
+        let repo = FilesystemMachineRepository::new(temp.path()).expect("init repo");
+        let migrated_audit_file = repo.audit_file_path(&legacy_id);
+
+        assert!(
+            migrated_audit_file.exists(),
+            "Migrated audit file must exist"
+        );
+        assert!(
+            !legacy_audit_file.exists(),
+            "Legacy audit file must be removed after migration"
+        );
+
+        let records = repo
+            .read_audit_events(&legacy_id)
+            .await
+            .expect("read migrated events");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].machine_name.as_str(), "legacy-vm");
+
+        // Re-initializing repo is idempotent and causes no data loss or corruption
+        let repo2 = FilesystemMachineRepository::new(temp.path()).expect("init repo 2");
+        let records2 = repo2
+            .read_audit_events(&legacy_id)
+            .await
+            .expect("read migrated events 2");
+        assert_eq!(records2.len(), 1);
+    }
 }

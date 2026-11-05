@@ -90,6 +90,32 @@ pub struct AuditRecord {
 }
 
 impl AuditRecord {
+    /// Creates a new operation intent audit event.
+    pub fn requested(
+        machine_id: MachineId,
+        machine_name: MachineName,
+        action: AuditAction,
+        state_before: Option<MachineState>,
+        state_after: Option<MachineState>,
+        actor: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: "1.0.0".to_string(),
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            machine_id,
+            machine_name,
+            action,
+            phase: AuditPhase::Requested,
+            actor: actor.into(),
+            state_before,
+            state_after,
+            result: AuditResult::Success,
+            error_message: None,
+            details: None,
+        }
+    }
+
     /// Creates a new successful completion audit event.
     pub fn completed(
         machine_id: MachineId,

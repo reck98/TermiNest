@@ -347,26 +347,34 @@ mod tests {
             .await
             .expect("stopped");
 
-        // Read audit records from disk before deletion
+        // Read audit records from disk before deletion (5 operations x 2 phases [requested, completed] = 10 records)
         let records = repo.read_audit_events(&id).await.expect("read audit");
-        assert_eq!(records.len(), 5);
+        assert_eq!(records.len(), 10);
+        let completed_records: Vec<_> = records
+            .iter()
+            .filter(|r| r.phase == terminest_core::domain::AuditPhase::Completed)
+            .collect();
+        assert_eq!(completed_records.len(), 5);
         assert_eq!(
-            records[0].action,
+            completed_records[0].action,
             terminest_core::domain::AuditAction::Create
         );
         assert_eq!(
-            records[1].action,
+            completed_records[1].action,
             terminest_core::domain::AuditAction::Start
         );
         assert_eq!(
-            records[2].action,
+            completed_records[2].action,
             terminest_core::domain::AuditAction::Pause
         );
         assert_eq!(
-            records[3].action,
+            completed_records[3].action,
             terminest_core::domain::AuditAction::Resume
         );
-        assert_eq!(records[4].action, terminest_core::domain::AuditAction::Stop);
+        assert_eq!(
+            completed_records[4].action,
+            terminest_core::domain::AuditAction::Stop
+        );
 
         for r in &records {
             assert_eq!(r.schema_version, "1.0.0");
@@ -374,9 +382,120 @@ mod tests {
             assert!(r.error_message.is_none());
         }
 
-        // 6. Delete machine -> audit event 'delete' is appended before folder deletion
+        // 6. Delete machine -> audit event 'delete' is appended and survives machine deletion
         orch.delete_machine(&name_str, false)
             .await
             .expect("deleted");
+
+        // 7. Verify persistent audit durability after machine directory deletion!
+        assert!(repo.get_by_id(&id).await.expect("load").is_none());
+        let post_delete_records = repo
+            .read_audit_events(&id)
+            .await
+            .expect("read audit post delete");
+        assert_eq!(
+            post_delete_records.len(),
+            12,
+            "Audit history must survive machine deletion"
+        );
+        let last_record = post_delete_records.last().unwrap();
+        assert_eq!(
+            last_record.action,
+            terminest_core::domain::AuditAction::Delete
+        );
+        assert_eq!(
+            last_record.phase,
+            terminest_core::domain::AuditPhase::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_idempotent_deletion_retry_after_backend_removal() {
+        use terminest_core::backend::HypervisorBackend;
+
+        let (orch, backend, _temp) = setup_orchestrator();
+        let config = sample_config("idempotent-del-test");
+        let id = config.id;
+        let name_str = config.name.to_string();
+
+        orch.create_machine(config).await.expect("created");
+
+        // Simulate partial deletion: machine is removed from the hypervisor backend first
+        backend
+            .delete_machine(&id)
+            .await
+            .expect("backend delete ok");
+
+        // Now delete_machine is called / retried: must handle backend MachineNotFound idempotently!
+        let res = orch.delete_machine(&name_str, false).await;
+        assert!(
+            res.is_ok(),
+            "Deletion retry must succeed idempotently when backend is already deleted"
+        );
+
+        // Verify machine is fully removed from orchestrator and repository
+        assert!(orch.list_machines().await.expect("list").is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_status_reconciliation_transitional_protection() {
+        let temp = tempdir().expect("tempdir");
+        let repo = Arc::new(FilesystemMachineRepository::new(temp.path()).expect("repo"));
+        let mock_backend = Arc::new(MockHypervisorBackend::new());
+
+        let mut registry = BackendRegistry::new();
+        registry.register(HypervisorType::Mock, mock_backend.clone());
+
+        let orch = Orchestrator::new(repo.clone(), Arc::new(registry));
+        let config = sample_config("transitional-guard-test");
+        let id = config.id;
+        let name_str = config.name.to_string();
+
+        orch.create_machine(config).await.expect("created");
+        orch.start_machine(&name_str).await.expect("started");
+
+        // Manually set persisted state to Pausing (transitional state)
+        repo.update_state(&id, MachineState::Pausing)
+            .await
+            .expect("set pausing");
+
+        // Query status: backend still reports Running, but status reconciliation must NOT
+        // overwrite the active Pausing transition with Running!
+        let status = orch.get_machine_status(&name_str).await.expect("status ok");
+        assert_eq!(status.state, MachineState::Pausing);
+
+        let persisted = repo.get_by_id(&id).await.expect("load").expect("record");
+        assert_eq!(persisted.state, MachineState::Pausing);
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_post_deletion_lock_safety_and_no_directory_recreation() {
+        let temp = tempdir().expect("tempdir");
+        let repo = Arc::new(FilesystemMachineRepository::new(temp.path()).expect("repo"));
+        let mock_backend = Arc::new(MockHypervisorBackend::new());
+
+        let mut registry = BackendRegistry::new();
+        registry.register(HypervisorType::Mock, mock_backend.clone());
+
+        let orch = Orchestrator::new(repo.clone(), Arc::new(registry));
+        let config = sample_config("post-del-safety-test");
+        let id = config.id;
+        let name_str = config.name.to_string();
+
+        orch.create_machine(config).await.expect("created");
+        orch.delete_machine(&name_str, false)
+            .await
+            .expect("deleted");
+
+        // Attempting to start the deleted machine must return MachineNotFound
+        let err = orch.start_machine(&name_str).await.unwrap_err();
+        assert!(matches!(err, CoreError::MachineNotFound(_)));
+
+        // External per-machine lock must NOT recreate the machine directory!
+        let machine_dir = repo.machine_dir(&id);
+        assert!(
+            !machine_dir.exists(),
+            "Deleted machine directory must not be recreated by lock acquisition"
+        );
     }
 }

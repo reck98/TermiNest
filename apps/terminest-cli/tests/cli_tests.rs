@@ -370,40 +370,60 @@ mod tests {
         run_terminest(&["start", "audit-vm"], temp.path());
         run_terminest(&["stop", "audit-vm"], temp.path());
 
-        // Locate audit.jsonl in machines directory
-        let machines_dir = temp.path().join("machines");
-        let entries = std::fs::read_dir(&machines_dir).expect("read machines dir");
-        let mut found_audit = false;
+        // Locate audit file in persistent audit directory
+        let audit_dir = temp.path().join("audit");
+        assert!(audit_dir.exists(), "audit directory must exist");
+        let entries = std::fs::read_dir(&audit_dir).expect("read audit dir");
+        let audit_files: Vec<_> = entries
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .collect();
+        assert_eq!(audit_files.len(), 1, "Expected exactly 1 audit file");
 
-        for entry in entries.flatten() {
-            let audit_file = entry.path().join("audit.jsonl");
-            if audit_file.exists() {
-                found_audit = true;
-                let content = std::fs::read_to_string(&audit_file).expect("read audit.jsonl");
-                assert!(!content.is_empty(), "audit.jsonl must not be empty!");
+        let audit_file = &audit_files[0].path();
+        let content = std::fs::read_to_string(audit_file).expect("read audit log");
+        assert!(!content.is_empty(), "audit file must not be empty!");
 
-                let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-                assert_eq!(lines.len(), 3, "Expected 3 events: create, start, stop");
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        // 3 operations x 2 phases (requested, completed) = 6 events
+        assert_eq!(
+            lines.len(),
+            6,
+            "Expected 6 events: requested & completed for create, start, stop"
+        );
 
-                for line in &lines {
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(line).expect("valid JSON line");
-                    assert_eq!(parsed["schema_version"], "1.0.0");
-                    assert_eq!(parsed["result"], "success");
-                    assert!(parsed["timestamp"].is_string());
-                }
-
-                let e0: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-                let e1: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-                let e2: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
-
-                assert_eq!(e0["action"], "create");
-                assert_eq!(e1["action"], "start");
-                assert_eq!(e2["action"], "stop");
-            }
+        for line in &lines {
+            let parsed: serde_json::Value = serde_json::from_str(line).expect("valid JSON line");
+            assert_eq!(parsed["schema_version"], "1.0.0");
+            assert_eq!(parsed["result"], "success");
+            assert!(parsed["timestamp"].is_string());
         }
 
-        assert!(found_audit, "audit.jsonl was not found on disk");
+        // Now delete the machine with confirmation
+        let (code_del, _, _) = run_terminest(&["delete", "audit-vm", "--confirm"], temp.path());
+        assert_eq!(code_del, 0, "Delete must succeed");
+
+        // Machine directory must be deleted, but audit file MUST survive!
+        assert!(
+            audit_file.exists(),
+            "audit log must survive machine deletion"
+        );
+        let post_delete_content =
+            std::fs::read_to_string(audit_file).expect("read post-delete audit log");
+        let post_delete_lines: Vec<&str> = post_delete_content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        // 6 previous events + requested & completed for delete = 8 events
+        assert_eq!(
+            post_delete_lines.len(),
+            8,
+            "Delete audit events must be recorded"
+        );
+        let last_event: serde_json::Value =
+            serde_json::from_str(post_delete_lines.last().unwrap()).unwrap();
+        assert_eq!(last_event["action"], "delete");
+        assert_eq!(last_event["phase"], "completed");
     }
 
     #[test]
