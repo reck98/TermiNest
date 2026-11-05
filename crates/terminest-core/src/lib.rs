@@ -19,7 +19,5 @@ pub use domain::{
     NetworkSpec, NetworkTier, OsFamily, OsSpec, PortForwardRule, StorageSpec,
 };
 pub use error::{CoreError, HypervisorError, PersistenceError};
-pub use orchestrator::{
-    BackendRegistry, MachineStatusView, MachineSummaryView, Orchestrator,
-};
+pub use orchestrator::{BackendRegistry, MachineStatusView, MachineSummaryView, Orchestrator};
 pub use persistence::{FilesystemMachineRepository, MachineRecord, MachineRepository};

@@ -112,7 +112,9 @@ mod tests {
         assert_eq!(stopped.state, MachineState::Stopped);
 
         // 9. Delete machine
-        orch.delete_machine(&name_str, false).await.expect("delete ok");
+        orch.delete_machine(&name_str, false)
+            .await
+            .expect("delete ok");
         let list_after = orch.list_machines().await.expect("list ok");
         assert!(list_after.is_empty());
     }
@@ -128,10 +130,15 @@ mod tests {
 
         // Attempting to delete running machine without force must fail
         let err = orch.delete_machine(&name_str, false).await.unwrap_err();
-        assert!(matches!(err, CoreError::Lifecycle(LifecycleError::CannotDeleteWhileRunning)));
+        assert!(matches!(
+            err,
+            CoreError::Lifecycle(LifecycleError::CannotDeleteWhileRunning)
+        ));
 
         // With force = true, delete stops and removes the machine
-        orch.delete_machine(&name_str, true).await.expect("force delete succeeds");
+        orch.delete_machine(&name_str, true)
+            .await
+            .expect("force delete succeeds");
         assert!(orch.list_machines().await.expect("list ok").is_empty());
     }
 
@@ -189,7 +196,10 @@ mod tests {
         let orch2 = Orchestrator::new(repo.clone(), Arc::new(fresh_registry));
 
         // Persisted state was "running", but query status reconciles with fresh backend
-        let status = orch2.get_machine_status(&name_str).await.expect("status ok");
+        let status = orch2
+            .get_machine_status(&name_str)
+            .await
+            .expect("status ok");
         // Reconciled state should not be falsely reported as Running!
         assert_ne!(status.state, MachineState::Running);
         assert!(matches!(
@@ -237,7 +247,10 @@ mod tests {
         // but no panic or data race occurs!
         assert!(r1.is_ok() || r2.is_ok());
 
-        let final_status = orch_arc.get_machine_status(&name_str).await.expect("status");
+        let final_status = orch_arc
+            .get_machine_status(&name_str)
+            .await
+            .expect("status");
         assert_eq!(final_status.state, MachineState::Stopped);
     }
 }

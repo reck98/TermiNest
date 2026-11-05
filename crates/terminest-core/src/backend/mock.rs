@@ -1,29 +1,43 @@
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
-use std::time::{Duration, Instant};
-use async_trait::async_trait;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
-use crate::backend::{BackendMachineStatus, HypervisorBackend, HypervisorCapabilities, MockFailure};
+use crate::backend::{
+    BackendMachineStatus, HypervisorBackend, HypervisorCapabilities, MockFailure,
+};
 use crate::domain::{HypervisorType, MachineConfig, MachineId, MachineState};
 use crate::error::HypervisorError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MockMachineEntry {
     config: MachineConfig,
     state: MachineState,
     pid: Option<u32>,
-    started_at: Option<Instant>,
+    started_at_secs: Option<u64>,
 }
 
-/// In-memory mock hypervisor backend for deterministic unit and orchestration testing.
+fn current_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Mock hypervisor backend for deterministic unit and CLI integration testing.
+/// Can operate purely in-memory or persist simulated hypervisor state to a file across CLI invocations.
 #[derive(Debug, Clone)]
 pub struct MockHypervisorBackend {
     capabilities: HypervisorCapabilities,
     machines: Arc<RwLock<HashMap<MachineId, MockMachineEntry>>>,
     failure: Arc<StdRwLock<Option<MockFailure>>>,
     pid_counter: Arc<AtomicU32>,
+    state_file: Option<PathBuf>,
 }
 
 impl Default for MockHypervisorBackend {
@@ -40,11 +54,46 @@ impl MockHypervisorBackend {
 
     /// Creates a MockHypervisorBackend with custom capability flags.
     pub fn with_capabilities(capabilities: HypervisorCapabilities) -> Self {
+        Self::with_state_file(capabilities, None)
+    }
+
+    /// Creates a MockHypervisorBackend with optional disk-backed persistence across process restarts.
+    pub fn with_state_file(
+        capabilities: HypervisorCapabilities,
+        state_file: Option<PathBuf>,
+    ) -> Self {
+        let initial_machines = if let Some(ref path) = state_file {
+            if path.exists() {
+                fs::read(path)
+                    .ok()
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<HashMap<MachineId, MockMachineEntry>>(&bytes).ok()
+                    })
+                    .unwrap_or_default()
+            } else {
+                HashMap::new()
+            }
+        } else {
+            HashMap::new()
+        };
+
         Self {
             capabilities,
-            machines: Arc::new(RwLock::new(HashMap::new())),
+            machines: Arc::new(RwLock::new(initial_machines)),
             failure: Arc::new(StdRwLock::new(None)),
             pid_counter: Arc::new(AtomicU32::new(50000)),
+            state_file,
+        }
+    }
+
+    fn persist_state(&self, machines: &HashMap<MachineId, MockMachineEntry>) {
+        if let Some(ref path) = self.state_file {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_vec_pretty(machines) {
+                let _ = fs::write(path, json);
+            }
         }
     }
 
@@ -127,10 +176,11 @@ impl HypervisorBackend for MockHypervisorBackend {
                 config: config.clone(),
                 state: MachineState::Created,
                 pid: None,
-                started_at: None,
+                started_at_secs: None,
             },
         );
 
+        self.persist_state(&lock);
         Ok(())
     }
 
@@ -149,16 +199,19 @@ impl HypervisorBackend for MockHypervisorBackend {
         }
 
         let pid = self.pid_counter.fetch_add(1, Ordering::SeqCst);
+        let memory_mb = entry.config.hardware.memory_mb;
         entry.state = MachineState::Running;
         entry.pid = Some(pid);
-        entry.started_at = Some(Instant::now());
+        entry.started_at_secs = Some(current_epoch_secs());
+
+        self.persist_state(&lock);
 
         Ok(BackendMachineStatus {
             id: *id,
             state: MachineState::Running,
             pid: Some(pid),
             uptime_secs: 0,
-            memory_rss_bytes: entry.config.hardware.memory_mb * 1024 * 1024,
+            memory_rss_bytes: memory_mb * 1024 * 1024,
         })
     }
 
@@ -184,8 +237,9 @@ impl HypervisorBackend for MockHypervisorBackend {
 
         entry.state = MachineState::Stopped;
         entry.pid = None;
-        entry.started_at = None;
+        entry.started_at_secs = None;
 
+        self.persist_state(&lock);
         Ok(())
     }
 
@@ -209,6 +263,7 @@ impl HypervisorBackend for MockHypervisorBackend {
         }
 
         entry.state = MachineState::Paused;
+        self.persist_state(&lock);
         Ok(())
     }
 
@@ -232,6 +287,7 @@ impl HypervisorBackend for MockHypervisorBackend {
         }
 
         entry.state = MachineState::Running;
+        self.persist_state(&lock);
         Ok(())
     }
 
@@ -248,6 +304,7 @@ impl HypervisorBackend for MockHypervisorBackend {
         }
 
         lock.remove(id);
+        self.persist_state(&lock);
         Ok(())
     }
 
@@ -261,8 +318,8 @@ impl HypervisorBackend for MockHypervisorBackend {
         let entry = lock.get(id).ok_or(HypervisorError::MachineNotFound(*id))?;
 
         let uptime_secs = entry
-            .started_at
-            .map(|t| t.elapsed().as_secs())
+            .started_at_secs
+            .map(|start| current_epoch_secs().saturating_sub(start))
             .unwrap_or(0);
 
         Ok(BackendMachineStatus {

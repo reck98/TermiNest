@@ -66,7 +66,10 @@ mod tests {
         ));
 
         // 2. Create machine
-        backend.create_machine(&config).await.expect("create succeeds");
+        backend
+            .create_machine(&config)
+            .await
+            .expect("create succeeds");
         let status = backend.get_machine_status(&id).await.expect("status ok");
         assert_eq!(status.state, MachineState::Created);
         assert_eq!(status.pid, None);
@@ -131,7 +134,10 @@ mod tests {
 
         // Attempt pause -> returns UnsupportedOperation
         let err = backend.pause_machine(&id).await.unwrap_err();
-        assert!(matches!(err, HypervisorError::UnsupportedOperation("pause", "mock")));
+        assert!(matches!(
+            err,
+            HypervisorError::UnsupportedOperation("pause", "mock")
+        ));
     }
 
     #[tokio::test]
@@ -141,7 +147,9 @@ mod tests {
         let config = sample_config(id, "failure-vm");
 
         // Inject create failure
-        backend.inject_failure(MockFailure::FailCreate("disk image allocation failed".into()));
+        backend.inject_failure(MockFailure::FailCreate(
+            "disk image allocation failed".into(),
+        ));
         let err = backend.create_machine(&config).await.unwrap_err();
         assert_eq!(
             err,
@@ -166,11 +174,17 @@ mod tests {
 
         // Inject timeout
         backend.inject_failure(MockFailure::Timeout(Duration::from_millis(500)));
-        let err = backend.stop_machine(&id, Duration::from_secs(1), false).await.unwrap_err();
+        let err = backend
+            .stop_machine(&id, Duration::from_secs(1), false)
+            .await
+            .unwrap_err();
         assert_eq!(err, HypervisorError::Timeout(Duration::from_millis(500)));
 
         // Clear and stop cleanly
         backend.clear_failures();
-        backend.stop_machine(&id, Duration::from_secs(1), false).await.expect("stopped");
+        backend
+            .stop_machine(&id, Duration::from_secs(1), false)
+            .await
+            .expect("stopped");
     }
 }

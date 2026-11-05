@@ -1,5 +1,5 @@
-use std::time::Duration;
 use async_trait::async_trait;
+use std::time::Duration;
 
 use crate::backend::{BackendMachineStatus, HypervisorCapabilities};
 use crate::domain::{HypervisorType, MachineConfig, MachineId};
@@ -45,5 +45,8 @@ pub trait HypervisorBackend: Send + Sync {
     async fn delete_machine(&self, id: &MachineId) -> Result<(), HypervisorError>;
 
     /// Queries the live runtime state of the virtual machine directly from the backend.
-    async fn get_machine_status(&self, id: &MachineId) -> Result<BackendMachineStatus, HypervisorError>;
+    async fn get_machine_status(
+        &self,
+        id: &MachineId,
+    ) -> Result<BackendMachineStatus, HypervisorError>;
 }

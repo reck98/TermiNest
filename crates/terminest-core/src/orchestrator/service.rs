@@ -32,7 +32,9 @@ impl Orchestrator {
     /// Acquires an in-process mutual exclusion guard for a specific machine ID.
     async fn acquire_machine_lock(&self, id: &MachineId) -> Arc<Mutex<()>> {
         let mut map = self.locks.lock().await;
-        map.entry(*id).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+        map.entry(*id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Resolves a machine selector (either a UUID or human-readable machine name) to a MachineRecord.
@@ -60,10 +62,14 @@ impl Orchestrator {
         let _guard = lock.lock().await;
 
         if let Some(existing) = self.repository.get_by_id(&config.id).await? {
-            return Err(CoreError::MachineAlreadyExists(existing.config.name.to_string()));
+            return Err(CoreError::MachineAlreadyExists(
+                existing.config.name.to_string(),
+            ));
         }
         if let Some(existing) = self.repository.get_by_name(&config.name).await? {
-            return Err(CoreError::MachineAlreadyExists(existing.config.name.to_string()));
+            return Err(CoreError::MachineAlreadyExists(
+                existing.config.name.to_string(),
+            ));
         }
 
         let backend = self.backend_registry.get(config.hypervisor.backend)?;
@@ -99,7 +105,9 @@ impl Orchestrator {
         // Verify lifecycle rule
         record.state.transition_to(MachineState::Starting)?;
 
-        let backend = self.backend_registry.get(record.config.hypervisor.backend)?;
+        let backend = self
+            .backend_registry
+            .get(record.config.hypervisor.backend)?;
 
         // Record transitioning to Starting
         self.repository
@@ -128,7 +136,10 @@ impl Orchestrator {
                 })
             }
             Err(err) => {
-                let _ = self.repository.update_state(&id, MachineState::Failed).await;
+                let _ = self
+                    .repository
+                    .update_state(&id, MachineState::Failed)
+                    .await;
                 Err(CoreError::Backend(err))
             }
         }
@@ -151,7 +162,9 @@ impl Orchestrator {
             record.state.transition_to(MachineState::Stopping)?;
         }
 
-        let backend = self.backend_registry.get(record.config.hypervisor.backend)?;
+        let backend = self
+            .backend_registry
+            .get(record.config.hypervisor.backend)?;
 
         self.repository
             .update_state(&id, MachineState::Stopping)
@@ -187,7 +200,9 @@ impl Orchestrator {
 
         record.state.transition_to(MachineState::Pausing)?;
 
-        let backend = self.backend_registry.get(record.config.hypervisor.backend)?;
+        let backend = self
+            .backend_registry
+            .get(record.config.hypervisor.backend)?;
 
         backend.pause_machine(&id).await?;
 
@@ -219,7 +234,9 @@ impl Orchestrator {
 
         record.state.transition_to(MachineState::Resuming)?;
 
-        let backend = self.backend_registry.get(record.config.hypervisor.backend)?;
+        let backend = self
+            .backend_registry
+            .get(record.config.hypervisor.backend)?;
 
         backend.resume_machine(&id).await?;
 
@@ -228,15 +245,17 @@ impl Orchestrator {
             .update_state(&id, MachineState::Running)
             .await?;
 
-        let status = backend.get_machine_status(&id).await.unwrap_or(
-            crate::backend::BackendMachineStatus {
-                id,
-                state: MachineState::Running,
-                pid: None,
-                uptime_secs: 0,
-                memory_rss_bytes: 0,
-            },
-        );
+        let status =
+            backend
+                .get_machine_status(&id)
+                .await
+                .unwrap_or(crate::backend::BackendMachineStatus {
+                    id,
+                    state: MachineState::Running,
+                    pid: None,
+                    uptime_secs: 0,
+                    memory_rss_bytes: 0,
+                });
 
         Ok(MachineStatusView {
             id,
@@ -261,11 +280,15 @@ impl Orchestrator {
 
         if record.state.is_running() {
             if !force {
-                return Err(CoreError::Lifecycle(LifecycleError::CannotDeleteWhileRunning));
+                return Err(CoreError::Lifecycle(
+                    LifecycleError::CannotDeleteWhileRunning,
+                ));
             }
             // Stop machine with force before deleting
             if let Ok(backend) = self.backend_registry.get(record.config.hypervisor.backend) {
-                let _ = backend.stop_machine(&id, Duration::from_secs(1), true).await;
+                let _ = backend
+                    .stop_machine(&id, Duration::from_secs(1), true)
+                    .await;
             }
         }
 

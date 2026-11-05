@@ -14,7 +14,10 @@ pub trait MachineRepository: Send + Sync {
     async fn get_by_id(&self, id: &MachineId) -> Result<Option<MachineRecord>, PersistenceError>;
 
     /// Retrieves a machine record by its human-readable machine name.
-    async fn get_by_name(&self, name: &MachineName) -> Result<Option<MachineRecord>, PersistenceError>;
+    async fn get_by_name(
+        &self,
+        name: &MachineName,
+    ) -> Result<Option<MachineRecord>, PersistenceError>;
 
     /// Lists all discoverable machine records in the repository.
     async fn list(&self) -> Result<Vec<MachineRecord>, PersistenceError>;

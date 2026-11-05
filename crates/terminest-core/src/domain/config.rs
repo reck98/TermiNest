@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::domain::{MachineId, MachineName};
@@ -13,6 +13,15 @@ pub enum OsFamily {
     Windows,
 }
 
+impl std::fmt::Display for OsFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Linux => write!(f, "linux"),
+            Self::Windows => write!(f, "windows"),
+        }
+    }
+}
+
 /// Target CPU architectures for virtual machines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -21,6 +30,15 @@ pub enum Architecture {
     X86_64,
     #[serde(rename = "aarch64")]
     Aarch64,
+}
+
+impl std::fmt::Display for Architecture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::X86_64 => write!(f, "x86_64"),
+            Self::Aarch64 => write!(f, "aarch64"),
+        }
+    }
 }
 
 /// Virtual disk formats.
@@ -32,6 +50,16 @@ pub enum DiskFormat {
     Raw,
 }
 
+impl std::fmt::Display for DiskFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Vhdx => write!(f, "vhdx"),
+            Self::Qcow2 => write!(f, "qcow2"),
+            Self::Raw => write!(f, "raw"),
+        }
+    }
+}
+
 /// Network isolation tiers adhering to ADR-0008.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -40,6 +68,16 @@ pub enum NetworkTier {
     #[default]
     Nat,
     Bridged,
+}
+
+impl std::fmt::Display for NetworkTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Isolated => write!(f, "isolated"),
+            Self::Nat => write!(f, "nat"),
+            Self::Bridged => write!(f, "bridged"),
+        }
+    }
 }
 
 /// Hypervisor backend provider choices.
@@ -190,7 +228,9 @@ impl MachineConfig {
 
         // Validate Memory (512 MiB to 128 GiB)
         if self.hardware.memory_mb < 512 || self.hardware.memory_mb > 131_072 {
-            return Err(ConfigValidationError::InvalidMemory(self.hardware.memory_mb));
+            return Err(ConfigValidationError::InvalidMemory(
+                self.hardware.memory_mb,
+            ));
         }
 
         // Validate Display

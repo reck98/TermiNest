@@ -1,8 +1,8 @@
+use async_trait::async_trait;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use async_trait::async_trait;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -25,9 +25,8 @@ impl FilesystemMachineRepository {
         let base_dir = base_dir.as_ref().to_path_buf();
         let machines_dir = base_dir.join("machines");
 
-        fs::create_dir_all(&machines_dir).map_err(|_| {
-            PersistenceError::DirectoryUnreachable(machines_dir.clone())
-        })?;
+        fs::create_dir_all(&machines_dir)
+            .map_err(|_| PersistenceError::DirectoryUnreachable(machines_dir.clone()))?;
 
         Ok(Self {
             base_dir,
@@ -51,9 +50,9 @@ impl FilesystemMachineRepository {
     }
 
     fn write_atomic(&self, target_path: &Path, content: &[u8]) -> Result<(), PersistenceError> {
-        let parent = target_path
-            .parent()
-            .ok_or_else(|| PersistenceError::AtomicWriteFailed(target_path.to_path_buf(), "No parent dir".into()))?;
+        let parent = target_path.parent().ok_or_else(|| {
+            PersistenceError::AtomicWriteFailed(target_path.to_path_buf(), "No parent dir".into())
+        })?;
 
         fs::create_dir_all(parent).map_err(PersistenceError::Io)?;
 
@@ -98,9 +97,8 @@ impl FilesystemMachineRepository {
 
     fn read_record_file(path: &Path) -> Result<MachineRecord, PersistenceError> {
         let bytes = fs::read(path).map_err(PersistenceError::Io)?;
-        let record: MachineRecord = serde_json::from_slice(&bytes).map_err(|e| {
-            PersistenceError::CorruptMetadata(path.to_path_buf(), e.to_string())
-        })?;
+        let record: MachineRecord = serde_json::from_slice(&bytes)
+            .map_err(|e| PersistenceError::CorruptMetadata(path.to_path_buf(), e.to_string()))?;
         Ok(record)
     }
 }
@@ -146,7 +144,10 @@ impl MachineRepository for FilesystemMachineRepository {
         Ok(Some(record))
     }
 
-    async fn get_by_name(&self, name: &MachineName) -> Result<Option<MachineRecord>, PersistenceError> {
+    async fn get_by_name(
+        &self,
+        name: &MachineName,
+    ) -> Result<Option<MachineRecord>, PersistenceError> {
         let all = self.list().await?;
         for rec in all {
             if rec.config.name == *name {

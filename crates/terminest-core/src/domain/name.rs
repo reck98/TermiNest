@@ -1,6 +1,6 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::domain::ConfigValidationError;
 

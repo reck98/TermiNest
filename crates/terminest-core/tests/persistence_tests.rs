@@ -10,7 +10,9 @@ mod tests {
         OsSpec, StorageSpec,
     };
     use terminest_core::error::PersistenceError;
-    use terminest_core::persistence::{FilesystemMachineRepository, MachineRecord, MachineRepository};
+    use terminest_core::persistence::{
+        FilesystemMachineRepository, MachineRecord, MachineRepository,
+    };
 
     fn sample_record(name: &str) -> MachineRecord {
         let config = MachineConfig {
@@ -156,7 +158,11 @@ mod tests {
 
         // Simulate application restart by creating a new repository instance pointing to the same directory
         let new_repo = FilesystemMachineRepository::new(temp.path()).expect("init repo 2");
-        let loaded = new_repo.get_by_id(&id).await.expect("load ok").expect("found");
+        let loaded = new_repo
+            .get_by_id(&id)
+            .await
+            .expect("load ok")
+            .expect("found");
         assert_eq!(loaded.config.name.as_str(), "retained-vm");
         assert_eq!(loaded.state, MachineState::Created);
     }

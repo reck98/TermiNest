@@ -133,21 +133,47 @@ mod tests {
 
     #[test]
     fn test_lifecycle_allowed_transitions() {
-        assert!(MachineState::Defined.transition_to(MachineState::Created).is_ok());
-        assert!(MachineState::Created.transition_to(MachineState::Starting).is_ok());
-        assert!(MachineState::Starting.transition_to(MachineState::Running).is_ok());
-        assert!(MachineState::Running.transition_to(MachineState::Stopping).is_ok());
-        assert!(MachineState::Stopping.transition_to(MachineState::Stopped).is_ok());
-        assert!(MachineState::Stopped.transition_to(MachineState::Starting).is_ok());
+        assert!(MachineState::Defined
+            .transition_to(MachineState::Created)
+            .is_ok());
+        assert!(MachineState::Created
+            .transition_to(MachineState::Starting)
+            .is_ok());
+        assert!(MachineState::Starting
+            .transition_to(MachineState::Running)
+            .is_ok());
+        assert!(MachineState::Running
+            .transition_to(MachineState::Stopping)
+            .is_ok());
+        assert!(MachineState::Stopping
+            .transition_to(MachineState::Stopped)
+            .is_ok());
+        assert!(MachineState::Stopped
+            .transition_to(MachineState::Starting)
+            .is_ok());
 
-        assert!(MachineState::Running.transition_to(MachineState::Pausing).is_ok());
-        assert!(MachineState::Pausing.transition_to(MachineState::Paused).is_ok());
-        assert!(MachineState::Paused.transition_to(MachineState::Resuming).is_ok());
-        assert!(MachineState::Resuming.transition_to(MachineState::Running).is_ok());
+        assert!(MachineState::Running
+            .transition_to(MachineState::Pausing)
+            .is_ok());
+        assert!(MachineState::Pausing
+            .transition_to(MachineState::Paused)
+            .is_ok());
+        assert!(MachineState::Paused
+            .transition_to(MachineState::Resuming)
+            .is_ok());
+        assert!(MachineState::Resuming
+            .transition_to(MachineState::Running)
+            .is_ok());
 
-        assert!(MachineState::Stopped.transition_to(MachineState::Deleting).is_ok());
-        assert!(MachineState::Defined.transition_to(MachineState::Deleting).is_ok());
-        assert!(MachineState::Created.transition_to(MachineState::Deleting).is_ok());
+        assert!(MachineState::Stopped
+            .transition_to(MachineState::Deleting)
+            .is_ok());
+        assert!(MachineState::Defined
+            .transition_to(MachineState::Deleting)
+            .is_ok());
+        assert!(MachineState::Created
+            .transition_to(MachineState::Deleting)
+            .is_ok());
     }
 
     #[test]

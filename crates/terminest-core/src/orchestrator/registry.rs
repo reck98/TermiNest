@@ -25,10 +25,14 @@ impl BackendRegistry {
     }
 
     /// Retrieves the hypervisor backend corresponding to `backend_type`.
-    pub fn get(&self, backend_type: HypervisorType) -> Result<Arc<dyn HypervisorBackend>, HypervisorError> {
-        self.backends
-            .get(&backend_type)
-            .cloned()
-            .ok_or_else(|| HypervisorError::Unavailable(format!("Hypervisor provider '{backend_type}' is not registered")))
+    pub fn get(
+        &self,
+        backend_type: HypervisorType,
+    ) -> Result<Arc<dyn HypervisorBackend>, HypervisorError> {
+        self.backends.get(&backend_type).cloned().ok_or_else(|| {
+            HypervisorError::Unavailable(format!(
+                "Hypervisor provider '{backend_type}' is not registered"
+            ))
+        })
     }
 }
