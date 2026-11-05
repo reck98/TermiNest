@@ -3,9 +3,14 @@
 //! Owns the machine domain model, lifecycle state machine, hypervisor backend
 //! SPI, persistence abstraction, and orchestration engine.
 
+pub mod backend;
 pub mod domain;
 pub mod error;
 
+pub use backend::{
+    BackendMachineStatus, HypervisorBackend, HypervisorCapabilities, MockFailure,
+    MockHypervisorBackend,
+};
 pub use domain::{
     Architecture, ConfigValidationError, DiskFormat, DisplaySpec, HardwareSpec, HypervisorSpec,
     HypervisorType, LifecycleError, MachineConfig, MachineId, MachineName, MachineState,
