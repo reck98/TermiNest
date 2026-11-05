@@ -117,9 +117,9 @@ All subsystem components are categorized according to the authoritative five-sta
 | **Atomic Metadata Storage** | **Implemented & Tested** | Write-temp + sync + atomic rename (`MoveFileExW` replace) in `FilesystemMachineRepository`. |
 | **Name Collision Enforcement** | **Implemented & Tested** | Rejects duplicate machine names across distinct IDs with `PersistenceError::NameCollision`. |
 | **Runtime State Reconciliation** | **Implemented & Tested** | Reconciles persisted state against live backend query on startup/status check. |
-| **Per-Machine Concurrency Lock** | **Implemented & Tested** | Async mutex per machine preventing racing lifecycle operations. |
-| **CLI Executable (`terminest`)** | **Implemented & Tested** | Complete command hierarchy (`init`, `doctor`, `machine <subcommand>`, top-level aliases). |
-| **Exit Code Protocol** | **Implemented & Tested** | `0` = Success, `1` = User/Domain error, `2` = System/IO/Backend failure. |
+| **Per-Machine & Repository Concurrency Lock** | **Implemented & Tested** | Cross-process OS advisory file locks (`.repo.lock`, `.machine.lock`, `mock_backend.lock`) + async mutex preventing racing lifecycle operations and collision races across CLI processes. |
+| **CLI Executable (`terminest`)** | **Implemented & Tested** | Complete command hierarchy (`init`, `doctor`, `machine <subcommand>`, top-level aliases) with interactive/non-interactive `--confirm` enforcement. |
+| **Exit Code Protocol** | **Implemented & Tested** | POSIX-compliant: `0` = Success, `1` = Operational/domain/backend/persistence error, `2` = Usage or argument parsing error. |
 | **Human & JSON Output Modes** | **Implemented & Tested** | Tabular human output and strict `--json` output across all commands. |
 | **Platform Hyper-V Backend** | **Designed but Not Implemented** | Architecture approved in ADR-0002; implementation scheduled for Milestone 2. |
 | **Platform QEMU/WHP Backend** | **Designed but Not Implemented** | Architecture approved in ADR-0002; implementation scheduled for Milestone 2. |
@@ -399,7 +399,7 @@ All 9 required operational steps were executed live against `target/demo_environ
 2. **Least Privilege Operation:** The CLI and orchestrator execute fully in unprivileged user space. ordinary operations require no UAC elevation or administrator privileges.
 3. **No Shell Interpolation:** All backend parameters and configuration strings are represented as typed data structures. No shell commands (`cmd.exe`, `powershell.exe`, `/bin/sh`) are invoked.
 4. **Sanitized Error Propagation:** Internal errors and IO failures are mapped into typed domain errors (`CoreError`, `LifecycleError`, `HypervisorError`, `PersistenceError`) rather than printing uncontrolled stack traces or host environment disclosures.
-5. **Atomic Audit Logging:** Machine directories automatically initialize an append-only `audit.jsonl` log file, establishing the structure for STRIDE-R1/R2 compliance.
+5. **Structured Audit Logging:** Machine directories maintain an append-only `audit.jsonl` log file, durably recording structured events (timestamp, action, actor, states, outcome) on every lifecycle transition in compliance with STRIDE-R1/R2.
 
 ---
 
