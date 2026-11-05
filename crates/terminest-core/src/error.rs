@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+pub use crate::backend::qemu::QemuError;
 pub use crate::domain::LifecycleError;
 use crate::domain::{MachineId, MachineName};
 
@@ -96,4 +97,70 @@ pub enum PersistenceError {
 
     #[error("I/O error during persistence: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl From<QemuError> for HypervisorError {
+    fn from(err: QemuError) -> Self {
+        match err {
+            QemuError::BinaryNotFound(p) => {
+                HypervisorError::Unavailable(format!("QEMU binary not found at {}", p.display()))
+            }
+            QemuError::AcceleratorUnavailable(msg) => HypervisorError::Unavailable(msg),
+            QemuError::VersionPolicyViolation(msg) => HypervisorError::Unavailable(msg),
+            QemuError::Timeout(d) => HypervisorError::Timeout(d),
+            other => HypervisorError::ExecutionFailed(other.to_string()),
+        }
+    }
+}
+
+impl From<QemuError> for CoreError {
+    fn from(err: QemuError) -> Self {
+        CoreError::Backend(HypervisorError::from(err))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_qemu_error_to_hypervisor_error() {
+        let err = QemuError::BinaryNotFound(PathBuf::from("/opt/qemu"));
+        let hyp_err: HypervisorError = err.into();
+        assert_eq!(
+            hyp_err,
+            HypervisorError::Unavailable("QEMU binary not found at /opt/qemu".to_string())
+        );
+
+        let err = QemuError::AcceleratorUnavailable("whpx missing".into());
+        let hyp_err: HypervisorError = err.into();
+        assert_eq!(
+            hyp_err,
+            HypervisorError::Unavailable("whpx missing".to_string())
+        );
+
+        let err = QemuError::VersionPolicyViolation("too old".into());
+        let hyp_err: HypervisorError = err.into();
+        assert_eq!(hyp_err, HypervisorError::Unavailable("too old".to_string()));
+
+        let d = std::time::Duration::from_secs(5);
+        let err = QemuError::Timeout(d);
+        let hyp_err: HypervisorError = err.into();
+        assert_eq!(hyp_err, HypervisorError::Timeout(d));
+
+        let err = QemuError::ConfigValidation("invalid smp".into());
+        let hyp_err: HypervisorError = err.into();
+        assert_eq!(
+            hyp_err,
+            HypervisorError::ExecutionFailed(
+                "Invalid QEMU process configuration: invalid smp".to_string()
+            )
+        );
+
+        let core_err: CoreError = QemuError::JobObjectAssignmentFailed.into();
+        assert!(matches!(
+            core_err,
+            CoreError::Backend(HypervisorError::ExecutionFailed(_))
+        ));
+    }
 }

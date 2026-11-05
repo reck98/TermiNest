@@ -1,4 +1,5 @@
 pub mod mock;
+pub mod qemu;
 pub mod traits;
 pub mod types;
 
