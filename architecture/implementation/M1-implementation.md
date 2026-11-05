@@ -2,7 +2,9 @@
 
 **Project:** TermiNest  
 **Milestone:** Milestone 1 (M1) Implementation & Verification  
-**Status:** Completed & Audited  
+**Status:** Formally Accepted & Closed  
+**Accepted Baseline Commit:** `bd0e9c89c12a1cbee2bd11a8507f6e278dd87d76`  
+**Acceptance Audit:** [M1-final-acceptance-audit.md](M1-final-acceptance-audit.md) (Verdict: PASS WITH CONDITIONS)  
 **Date:** November 2026  
 **Lead Engineer:** Principal Systems Architect & Senior Rust Engineer  
 **Host Platform:** Windows 11 (64-bit, x86_64), Rust 1.99.1 (`stable-x86_64-pc-windows-gnu`)  
@@ -465,9 +467,18 @@ Total Test Execution: 73 passed; 0 failed; 0 ignored; 100% pass rate.
 
 ## 14. Git Commit History
 
-The implementation was constructed incrementally in focused, verified commits:
+The implementation and remediation was constructed incrementally in focused, verified commits leading to the accepted baseline:
 
 ```text
+* bd0e9c8 docs(m1): author M1 final remediation report and update ledger
+* ea8406d feat(core): implement persistent audit storage, external locks, and two-phase audit protocol
+* 17f0be8 docs(m1): author M1 second independent reverification audit report
+* 324be04 docs(m1): author M1 correction report and update implementation records
+* 49ab753 fix(cli): normalize operational exit codes and enforce delete confirmation
+* 5e41c1f feat(core): enforce lifecycle deletion invariants and record structured audit events
+* ae5173b fix(core): add cross-process repository locking and serialize mock backend state
+* a5ee0ca docs(m1): author M1 independent verification audit report
+* 4d6bd9c docs(m1): author M1 implementation report and update implementation ledger
 * 0692d91 feat(cli): implement terminest command line interface with full lifecycle commands
 * f595e28 feat(core): implement core Orchestrator service with state reconciliation and concurrency protection
 * 30bb551 feat(core): implement machine metadata persistence and atomic filesystem storage
@@ -479,7 +490,8 @@ The implementation was constructed incrementally in focused, verified commits:
 ```
 
 - **Current Branch:** `main`
-- **Working Tree:** Clean (verified via `git status`)
+- **Accepted Baseline Commit:** `bd0e9c89c12a1cbee2bd11a8507f6e278dd87d76`
+- **Working Tree:** Clean
 
 ---
 
@@ -491,9 +503,22 @@ The implementation was constructed incrementally in focused, verified commits:
 
 ---
 
-## 16. Milestone 2 Readiness Assessment
+## 16. Milestone 2 Readiness Assessment & Formal M1 Closure
 
-Milestone 1 is complete and formally verified. The architecture is in a clean, tested state and ready for **Milestone 2: Windows Host -> Linux Guest (MVP)**:
+Milestone 1 is complete, verified by independent audit, and **formally accepted and closed**:
+- **Accepted Baseline Commit:** `bd0e9c89c12a1cbee2bd11a8507f6e278dd87d76`
+- **Final Audit Report:** [M1-final-acceptance-audit.md](M1-final-acceptance-audit.md)
+- **Final Audit Verdict:** `PASS WITH CONDITIONS`
+
+### Tracked Non-Blocking Conditions
+1. **Audit Log Retention/Archival Policy:** Audit logs are permanently retained under `<data_dir>/audit/<id>.jsonl` upon machine deletion. Automated archival, rotation, or pruning is deferred to M2 or production hardening (M7).
+2. **Legacy Audit Migration Validation:** Legacy migration helper `migrate_legacy_audit_log` should verify destination file byte length and checksum equality prior to removing source files (`MIGR-M1-01`).
+3. **Live Linux Multi-Process Verification:** Cross-process POSIX `flock` locking logic is fully implemented and statically verified; live multi-process verification is tracked pending Linux CI runners.
+
+### Architectural Boundary Clarification
+The real hypervisor backend (Hyper-V WMI v2, QEMU/WHP) is explicitly **not part of Milestone 1** and remains deferred to **Milestone 2: Windows Host -> Linux Guest (MVP)**. M1 provides the stable `HypervisorBackend` SPI trait, backend registry, and deterministic `MockHypervisorBackend`.
+
+The architecture is in a clean, tested state and ready for Milestone 2:
 - The `HypervisorBackend` SPI is established and ready to receive `HyperVBackend` (Windows Pro WMI v2) and `QemuWhpBackend` (Windows Home).
 - The `Orchestrator` is fully equipped to coordinate VM provisioning, lifecycle operations, and persistence without modification.
 - The CLI command structure is in place and verified.

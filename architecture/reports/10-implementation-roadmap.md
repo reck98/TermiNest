@@ -47,7 +47,10 @@ flowchart TD
 ## 3. Detailed Milestone Breakdown
 
 ### Milestone 0: Feasibility Spikes & Protocol Core
-**Primary Goal:** Prove kernel socket contracts, validate WMI/QMP access patterns, and establish shared serialization crates.
+**Primary Goal:** Prove kernel socket contracts, validate WMI/QMP access patterns, and establish shared serialization crates.  
+**Status:** Complete & Formally Accepted  
+**Accepted Baseline Commit:** `dc5cf701bd1fdcbd659cd22d10de71be1fd2a147`  
+**Acceptance Audit:** [M0-verification-audit.md](../implementation/M0-verification-audit.md) (Verdict: PASS)  
 
 - **Deliverables:**
   1. `terminest-protocol` crate: Fixed 16-byte header codec, Castagnoli CRC-32C validation, JSON-RPC 2.0 framing, and unit tests with property fuzzing.
@@ -61,8 +64,14 @@ flowchart TD
 ---
 
 ### Milestone 1: Core Host Orchestrator & CLI Foundation
-**Primary Goal:** Build the host application skeleton, CLI parser, configuration persistence, and mock test harness.
+**Primary Goal:** Build the host application skeleton, CLI parser, configuration persistence, and mock test harness.  
+**Status:** Complete & Formally Accepted  
+**Accepted Baseline Commit:** `bd0e9c89c12a1cbee2bd11a8507f6e278dd87d76`  
+**Acceptance Audit:** [M1-final-acceptance-audit.md](../implementation/M1-final-acceptance-audit.md) (Verdict: PASS WITH CONDITIONS)  
 
+- **Closure Conditions & Architectural Boundaries:**
+  - *Non-Blocking Conditions:* Permanent audit retention in `<data_dir>/audit/` (retention policy in M2+); legacy migration file verification (`MIGR-M1-01`); Linux CI multi-process verification.
+  - *Architectural Boundary:* Real hypervisor backend implementation (Hyper-V WMI v2, QEMU/WHP) is explicitly not part of M1 and remains deferred to Milestone 2.
 - **Deliverables:**
   1. Root workspace and CLI scaffolding (`clap` v4 with subcommands: `doctor`, `create`, `ls`, `start`, `status`, `stop`, `destroy`).
   2. Machine configuration manager: JSON schema validation, automatic directory layout creation (`%LOCALAPPDATA%\TermiNest` and `~/.local/share/terminest`).
